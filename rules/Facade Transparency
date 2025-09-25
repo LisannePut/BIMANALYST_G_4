@@ -102,3 +102,4 @@ else:
 print("Facade surface area (from properties):", facade_area)
 print("Window surface area (from properties):", window_area)
 print("Average facade transparency: {:.2f}%".format(transparency))
+
