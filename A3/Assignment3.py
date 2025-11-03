@@ -1,6 +1,23 @@
 import ifcopenshell
-import numpy as np
 import os
+import math
+
+def get_property(entity, property_name, property_set_name=None):
+    """Get a property value from an IFC entity"""
+    try:
+        if hasattr(entity, "IsDefinedBy"):
+            for definition in entity.IsDefinedBy:
+                if definition.is_a("IfcRelDefinesByProperties"):
+                    property_set = definition.RelatingPropertyDefinition
+                    if property_set_name and property_set.Name != property_set_name:
+                        continue
+                    if property_set.is_a("IfcPropertySet"):
+                        for prop in property_set.HasProperties:
+                            if prop.Name == property_name and hasattr(prop, "NominalValue"):
+                                return prop.NominalValue.wrappedValue
+    except Exception:
+        pass
+    return None
 
 def load_ifc_file(file_path):
     """
@@ -34,65 +51,97 @@ def get_doors(model):
     """
     return model.by_type("IfcDoor")
 
-def is_elongated_space(space):
-    """
-    Check if a space is elongated (potential corridor)
-    Returns True if the space's length is significantly greater than its width
-    """
-    # Get the space's bounding box
-    bbox = space.get_bbox()
-    if not bbox:
-        return False
-        
-    length = max(
-        abs(bbox[3] - bbox[0]),  # X dimension
-        abs(bbox[4] - bbox[1])   # Y dimension
-    )
-    width = min(
-        abs(bbox[3] - bbox[0]),  # X dimension
-        abs(bbox[4] - bbox[1])   # Y dimension
-    )
+def get_space_type(space):
+    """Get the space type from properties"""
+    type_value = get_property(space, "ObjectType") or get_property(space, "LongName")
+    return type_value
+
+def analyze_space(space):
+    """Analyze a space and return its characteristics"""
+    name = get_space_name(space)
+    space_type = get_space_type(space)
+    area = get_property(space, "GrossFloorArea") or get_property(space, "NetFloorArea")
     
-    # Consider it elongated if length is at least 3 times the width
-    return length >= 3 * width
+    if not area:
+        return None
+        
+    # Convert area to float and ensure it's in square meters
+    area = float(area)
+    if area > 1000:  # If area is in square millimeters
+        area = area / 1000000
+    
+    # Estimate dimensions from area
+    estimated_width = math.sqrt(area / 3)  # Assuming length is roughly 3 times width
+    estimated_length = area / estimated_width
+    
+    # Convert to millimeters for checking requirements
+    estimated_width *= 1000
+    estimated_length *= 1000
+    
+    # Check if this might be a corridor based on name or type
+    keywords = ["hallway", "corridor", "circulation", "passage"]
+    is_named_corridor = any(keyword in (name or "").lower() for keyword in keywords)
+    is_typed_corridor = any(keyword in (space_type or "").lower() for keyword in keywords)
+    
+    return {
+        "name": name,
+        "type": space_type,
+        "area": area,
+        "estimated_width": estimated_width,
+        "estimated_length": estimated_length,
+        "is_elongated": estimated_length >= 3 * estimated_width,
+        "is_named_corridor": is_named_corridor,
+        "is_typed_corridor": is_typed_corridor
+    }
+
+
 
 def is_connected_to_stairs(space, stairs):
     """
     Check if a space is connected to stairs
     """
-    # Get the space's boundaries
-    space_bounds = space.BoundedBy
-    if not space_bounds:
-        return False
+    try:
+        # Try to find connections through space boundaries
+        for rel in space.BoundedBy:
+            if hasattr(rel, 'RelatedBuildingElement'):
+                element = rel.RelatedBuildingElement
+                if element and element.is_a("IfcStair"):
+                    return True
+                    
+        # Also check for nearby stairs
+        for stair in stairs:
+            if hasattr(stair, 'ObjectPlacement') and hasattr(space, 'ObjectPlacement'):
+                # If they have placements, they might be connected
+                return True
+                
+    except Exception as e:
+        print(f"Error checking stair connection: {e}")
         
-    # Check each boundary
-    for boundary in space_bounds:
-        relating_element = boundary.RelatedBuildingElement
-        if relating_element and relating_element.is_a("IfcStair"):
-            return True
-            
     return False
 
 def get_space_connections(space):
     """
     Get all spaces connected to this space through doors
     """
-    connected_spaces = []
+    connected_spaces = set()
     
-    # Get all doors connected to this space
-    space_bounds = space.BoundedBy
-    if not space_bounds:
-        return connected_spaces
+    try:
+        # Check all relationships for this space
+        for rel in space.ContainsElements:
+            if hasattr(rel, 'RelatedElements'):
+                for element in rel.RelatedElements:
+                    if element.is_a("IfcDoor"):
+                        # Found a door, look for connected spaces
+                        for ref in element.ReferencedBy:
+                            if hasattr(ref, 'RelatingSpace'):
+                                connected_space = ref.RelatingSpace
+                                if connected_space != space:
+                                    connected_spaces.add(connected_space)
+                                    
+    except Exception as e:
+        print(f"Error getting space connections: {e}")
         
-    for boundary in space_bounds:
-        if boundary.RelatedBuildingElement and boundary.RelatedBuildingElement.is_a("IfcDoor"):
-            # Find spaces on the other side of the door
-            door = boundary.RelatedBuildingElement
-            for rel in door.ContainedInStructure:
-                if rel.RelatingStructure and rel.RelatingStructure != space:
-                    connected_spaces.append(rel.RelatingStructure)
-                    
-    return connected_spaces
+    return list(connected_spaces)
 
 def get_corridor_width(space):
     """
@@ -109,17 +158,11 @@ def get_corridor_width(space):
     )
 
 def get_space_name(space):
-    """
-    Get the name of an IFC space
-    """
-    for prop in space.IsDefinedBy:
-        if prop.is_a("IfcRelDefinesByProperties"):
-            pset = prop.RelatingPropertyDefinition
-            if pset.is_a("IfcPropertySet"):
-                for property in pset.HasProperties:
-                    if property.Name in ["Name", "LongName"]:
-                        return property.NominalValue.wrappedValue
-    return None
+    """Get the name of a space"""
+    name = get_property(space, "Name")
+    if not name:
+        name = get_property(space, "LongName")
+    return name
 
 def identify_corridors(model):
     """
@@ -185,43 +228,108 @@ def check_corridor_requirements(corridor_info):
     
     return issues
 
+def check_requirements(analysis):
+    """Check all requirements and return results"""
+    MIN_WIDTH = 1300  # minimum width in mm
+    MIN_LENGTH_WIDTH_RATIO = 3  # minimum ratio of length to width for corridors
+    
+    checks = {
+        "width": {
+            "value": analysis["estimated_width"],
+            "requirement": f">= {MIN_WIDTH}mm",
+            "pass": analysis["estimated_width"] >= MIN_WIDTH,
+            "message": f"Width is {analysis['estimated_width']:.0f}mm"
+        },
+        "elongation": {
+            "value": analysis["estimated_length"] / analysis["estimated_width"],
+            "requirement": f">= {MIN_LENGTH_WIDTH_RATIO}x width",
+            "pass": analysis["is_elongated"],
+            "message": f"Length ({analysis['estimated_length']:.0f}mm) is {analysis['estimated_length']/analysis['estimated_width']:.1f}x width"
+        },
+        "area": {
+            "value": analysis["area"],
+            "requirement": "informational",
+            "pass": True,
+            "message": f"Area is {analysis['area']:.1f}m²"
+        },
+        "identification": {
+            "value": analysis["is_named_corridor"] or analysis["is_typed_corridor"],
+            "requirement": "informational",
+            "pass": True,
+            "message": f"Space {'is' if analysis['is_named_corridor'] or analysis['is_typed_corridor'] else 'is not'} identified as corridor in the model"
+        }
+    }
+    
+    return checks
+
 def main():
     # Path to your IFC file
-    ifc_file_path = os.path.join("model", "25-16-D-ARCH.ifc")
+    ifc_file_path = os.path.join(os.path.dirname(__file__), "model", "25-16-D-ARCH.ifc")
     
     try:
-        # Load the IFC file
-        model = load_ifc_file(ifc_file_path)
-        
-        # Identify and analyze corridors
-        corridors = identify_corridors(model)
-        
         print("=== Corridor Analysis Report ===")
-        print(f"\nAnalyzing {len(corridors)} spaces (named 'Hallway' or meeting corridor criteria)")
-        print("\nSpaces with requirement violations:")
         
-        # Track if any violations were found
+        # Load the IFC file
+        model = ifcopenshell.open(ifc_file_path)
+        
+        # Get all spaces
+        spaces = model.by_type("IfcSpace")
+        print(f"\nAnalyzing {len(spaces)} spaces...")
+        
+        # Track spaces analyzed
+        spaces_analyzed = 0
         violations_found = False
         
-        # Check each space against requirements
-        for corridor in corridors:
-            issues = check_corridor_requirements(corridor)
+        # Analyze each space
+        for space in spaces:
+            analysis = analyze_space(space)
+            if not analysis:
+                continue
+                
+            name = analysis["name"] or "Unnamed Space"
+            is_hallway = name and "hallway" in name.lower()
             
-            if issues:
-                violations_found = True
-                print(f"\nSpace: {corridor['name'] or 'Unnamed Space'}")
-                print(f"Properties:")
-                print(f"- Width: {corridor['width']}mm")
-                print(f"- Is elongated: {'Yes' if corridor['is_elongated'] else 'No'}")
-                print(f"- Connected spaces: {corridor['num_connected_spaces']}")
-                print(f"- Connected to stairs: {'Yes' if corridor['connected_to_stairs'] else 'No'}")
-                print("Violations:")
-                for issue in issues:
-                    print(f"  {issue}")
+            # Show analysis for potential corridors or spaces that might be corridors
+            if analysis["is_named_corridor"] or analysis["is_typed_corridor"] or analysis["is_elongated"]:
+                spaces_analyzed += 1
+                checks = check_requirements(analysis)
+                
+                print(f"\n{'='*50}")
+                print(f"Space: {name}")
+                if analysis["type"]:
+                    print(f"Type: {analysis['type']}")
+                print(f"{'='*50}")
+                
+                # Print all checks with their results
+                print("Requirements Check:")
+                for check_name, check in checks.items():
+                    status = "PASS" if check["pass"] else "FAIL"
+                    if check["requirement"] == "informational":
+                        print(f"- {check_name.title()}: {check['message']}")
+                    else:
+                        print(f"- {check_name.title()}: {status}")
+                        print(f"  Value: {check['message']}")
+                        print(f"  Requirement: {check['requirement']}")
+                
+                # Additional information
+                print("\nAdditional Properties:")
+                print(f"- Marked as hallway/corridor in model: {'Yes' if is_hallway else 'No'}")
+                print(f"- Meets elongated space criteria: {'Yes' if analysis['is_elongated'] else 'No'}")
+                
+                # Track violations
+                if not all(check["pass"] for check in checks.values()):
+                    violations_found = True
         
+        print(f"\n{'='*50}")
+        print(f"Analysis Summary:")
+        print(f"{'='*50}")
+        print(f"Total spaces in model: {len(spaces)}")
+        print(f"Spaces analyzed as potential corridors: {spaces_analyzed}")
         if not violations_found:
-            print("\nAll analyzed spaces meet corridor requirements.")
-        
+            print("Result: All analyzed spaces meet corridor requirements.")
+        else:
+            print("Result: Some spaces have requirement violations (see details above).")
+            
     except Exception as e:
         print(f"Error: {e}")
 
