@@ -5,18 +5,33 @@ import math
 def get_property(entity, property_name, property_set_name=None):
     """Get a property value from an IFC entity"""
     try:
+        # Try to get direct attributes first
+        if hasattr(entity, property_name):
+            return getattr(entity, property_name)
+        
+        # Try to get from property sets
         if hasattr(entity, "IsDefinedBy"):
             for definition in entity.IsDefinedBy:
                 if definition.is_a("IfcRelDefinesByProperties"):
                     property_set = definition.RelatingPropertyDefinition
-                    if property_set_name and property_set.Name != property_set_name:
-                        continue
                     if property_set.is_a("IfcPropertySet"):
+                        if property_set_name and property_set.Name != property_set_name:
+                            continue
                         for prop in property_set.HasProperties:
                             if prop.Name == property_name and hasattr(prop, "NominalValue"):
                                 return prop.NominalValue.wrappedValue
-    except Exception:
-        pass
+                            elif prop.Name == property_name:
+                                # For cases where the property might be stored differently
+                                if hasattr(prop, "wrappedValue"):
+                                    return prop.wrappedValue
+                                elif hasattr(prop, "LengthValue"):
+                                    return prop.LengthValue
+                                elif hasattr(prop, "AreaValue"):
+                                    return prop.AreaValue
+                                elif hasattr(prop, "VolumeValue"):
+                                    return prop.VolumeValue
+    except Exception as e:
+        print(f"Error getting property {property_name} from {entity.is_a()}: {e}")
     return None
 
 def load_ifc_file(file_path):
@@ -60,23 +75,45 @@ def analyze_space(space):
     """Analyze a space and return its characteristics"""
     name = get_space_name(space)
     space_type = get_space_type(space)
-    area = get_property(space, "GrossFloorArea") or get_property(space, "NetFloorArea")
+    
+    # Get dimensions from the Dimensions property set
+    area = get_property(space, "Area", "Dimensions")
+    perimeter = get_property(space, "Perimeter", "Dimensions")
     
     if not area:
+        print(f"Warning: Could not get area for space {name}")
         return None
         
-    # Convert area to float and ensure it's in square meters
+    # Convert area to square meters if needed
     area = float(area)
     if area > 1000:  # If area is in square millimeters
         area = area / 1000000
-    
-    # Estimate dimensions from area
-    estimated_width = math.sqrt(area / 3)  # Assuming length is roughly 3 times width
-    estimated_length = area / estimated_width
+        
+    # Use perimeter to get a better estimate of dimensions
+    if perimeter:
+        perimeter = float(perimeter)
+        # Using perimeter and area to estimate width and length
+        # For a rectangle: area = length * width, perimeter = 2(length + width)
+        # Solve quadratic equation: w^2 - (P/2)w + A = 0
+        P = perimeter / 2
+        A = area
+        # width = (P - sqrt(P^2 - 4A))/2  # smaller dimension
+        discriminant = P*P - 4*A
+        if discriminant > 0:
+            estimated_width = (P - math.sqrt(discriminant))/2
+            estimated_length = area/estimated_width
+        else:
+            # Fallback to simpler estimation if the space isn't rectangular
+            estimated_width = math.sqrt(area / 3)  # Assuming length is roughly 3 times width
+            estimated_length = area / estimated_width
+    else:
+        # Fallback to simple estimation
+        estimated_width = math.sqrt(area / 3)
+        estimated_length = area / estimated_width
     
     # Convert to millimeters for checking requirements
-    estimated_width *= 1000
-    estimated_length *= 1000
+    estimated_width_mm = estimated_width * 1000
+    estimated_length_mm = estimated_length * 1000
     
     # Check if this might be a corridor based on name or type
     keywords = ["hallway", "corridor", "circulation", "passage"]
@@ -86,6 +123,10 @@ def analyze_space(space):
     return {
         "name": name,
         "type": space_type,
+        "area": area,
+        "width": estimated_width_mm,
+        "length": estimated_length_mm,
+        "is_elongated": estimated_length_mm >= 3 * estimated_width_mm,
         "area": area,
         "estimated_width": estimated_width,
         "estimated_length": estimated_length,
@@ -278,24 +319,42 @@ def main():
         
         # Track spaces analyzed
         spaces_analyzed = 0
-        violations_found = False
+        potential_corridors = []
+        all_spaces_info = []
         
-        # Analyze each space
+        # First pass: collect information about all spaces
         for space in spaces:
             analysis = analyze_space(space)
             if not analysis:
                 continue
                 
             name = analysis["name"] or "Unnamed Space"
-            is_hallway = name and "hallway" in name.lower()
+            all_spaces_info.append((name, analysis["type"]))
             
-            # Show analysis for potential corridors or spaces that might be corridors
-            if analysis["is_named_corridor"] or analysis["is_typed_corridor"] or analysis["is_elongated"]:
+            # Check if this might be a corridor
+            if (analysis["is_named_corridor"] or 
+                analysis["is_typed_corridor"] or 
+                analysis["is_elongated"] or 
+                analysis["estimated_width"] >= 1300):
+                potential_corridors.append((space, analysis))
+        
+        # Print overview of all spaces
+        print("\nAll Spaces in Model:")
+        print("="*50)
+        for name, type_info in sorted(all_spaces_info):
+            print(f"- {name} (Type: {type_info if type_info else 'Not specified'})")
+        
+        # Analyze potential corridors
+        if potential_corridors:
+            print("\nDetailed Analysis of Potential Corridors:")
+            print("="*50)
+            
+            for space, analysis in potential_corridors:
                 spaces_analyzed += 1
                 checks = check_requirements(analysis)
                 
                 print(f"\n{'='*50}")
-                print(f"Space: {name}")
+                print(f"Space: {analysis['name']}")
                 if analysis["type"]:
                     print(f"Type: {analysis['type']}")
                 print(f"{'='*50}")
@@ -310,26 +369,13 @@ def main():
                         print(f"- {check_name.title()}: {status}")
                         print(f"  Value: {check['message']}")
                         print(f"  Requirement: {check['requirement']}")
-                
-                # Additional information
-                print("\nAdditional Properties:")
-                print(f"- Marked as hallway/corridor in model: {'Yes' if is_hallway else 'No'}")
-                print(f"- Meets elongated space criteria: {'Yes' if analysis['is_elongated'] else 'No'}")
-                
-                # Track violations
-                if not all(check["pass"] for check in checks.values()):
-                    violations_found = True
         
         print(f"\n{'='*50}")
         print(f"Analysis Summary:")
         print(f"{'='*50}")
         print(f"Total spaces in model: {len(spaces)}")
-        print(f"Spaces analyzed as potential corridors: {spaces_analyzed}")
-        if not violations_found:
-            print("Result: All analyzed spaces meet corridor requirements.")
-        else:
-            print("Result: Some spaces have requirement violations (see details above).")
-            
+        print(f"Potential corridors analyzed: {spaces_analyzed}")
+        
     except Exception as e:
         print(f"Error: {e}")
 
