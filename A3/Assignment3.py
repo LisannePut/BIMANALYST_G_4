@@ -267,7 +267,14 @@ def build_space_linkages_via_doors(model, spaces):
             try:
                 opening = rel.RelatingOpeningElement
                 element = rel.RelatedBuildingElement
-                if opening and element:
+                # Only consider mapping for actual doors
+                if opening and element and element.is_a('IfcDoor'):
+                    # prefer GlobalId for stable keys; skip if missing
+                    door_global_id = getattr(element, 'GlobalId', None)
+                    if not door_global_id:
+                        # skip elements without GlobalId to avoid transient id proliferation
+                        continue
+
                     opening_key = getattr(opening, 'GlobalId', None) or str(id(opening))
                     # try direct mapping first
                     spaces_touching = set(opening_to_spaces.get(opening_key, set()))
@@ -293,10 +300,27 @@ def build_space_linkages_via_doors(model, spaces):
                                     continue
                         except Exception:
                             pass
+                    # geometry containment fallback: try opening centroid inside space bboxes
+                    if not spaces_touching:
+                        try:
+                            # build space bboxes once
+                            if 'space_bboxes' not in locals():
+                                space_bboxes = build_space_bboxes(spaces)
+                            # get opening centroid
+                            cent = get_element_centroid(opening)
+                            if cent:
+                                cx, cy, cz = cent
+                                for spid, bbox in space_bboxes.items():
+                                    if not bbox:
+                                        continue
+                                    xmin, ymin, xmax, ymax = bbox
+                                    if xmin <= cx <= xmax and ymin <= cy <= ymax:
+                                        spaces_touching.add(spid)
+                        except Exception:
+                            pass
                     if spaces_touching:
-                        door_id = getattr(element, 'GlobalId', None) or str(id(element))
-                        door_to_spaces.setdefault(door_id, set()).update(spaces_touching)
-                        door_to_opening[door_id] = opening
+                        door_to_spaces.setdefault(door_global_id, set()).update(spaces_touching)
+                        door_to_opening[door_global_id] = opening
             except Exception:
                 continue
     except Exception:
@@ -353,6 +377,35 @@ def _get_numeric_property(entity, names):
 
     Accepts area/width stored in meters — converted to mm if appropriate.
     """
+    # First try entity attributes (some exporters put dimensions as attributes)
+    for n in names:
+        try:
+            # direct attribute (case-sensitive)
+            if hasattr(entity, n):
+                val = getattr(entity, n)
+                if val is not None:
+                    try:
+                        num = float(val)
+                        if num <= 100:
+                            return num * 1000.0
+                        return num
+                    except Exception:
+                        pass
+            # case-insensitive attribute check
+            for attr in dir(entity):
+                try:
+                    if attr.lower() == n.lower():
+                        val = getattr(entity, attr)
+                        if val is not None:
+                            num = float(val)
+                            if num <= 100:
+                                return num * 1000.0
+                            return num
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
     # Try without specifying a property set (search all PSets)
     for n in names:
         val = get_property(entity, n)
@@ -380,6 +433,69 @@ def _get_numeric_property(entity, names):
                 return num * 1000.0
             return num
 
+    return None
+
+
+def _find_numeric_by_substring(entity, substrings=None):
+    """Scan all property-sets and quantities for property names containing any of the substrings.
+
+    Returns first numeric value found (converted to mm if appropriate), else None.
+    """
+    if substrings is None:
+        substrings = ["width"]
+    subs = [s.lower() for s in substrings]
+
+    # Search IfcPropertySet entries
+    for definition in getattr(entity, 'IsDefinedBy', []) or []:
+        try:
+            if not definition.is_a('IfcRelDefinesByProperties'):
+                continue
+            pdef = definition.RelatingPropertyDefinition
+            if pdef is None:
+                continue
+            # Property sets
+            if pdef.is_a('IfcPropertySet'):
+                for prop in getattr(pdef, 'HasProperties', []) or []:
+                    pname = getattr(prop, 'Name', '')
+                    if not pname:
+                        continue
+                    pname_l = pname.lower()
+                    for sub in subs:
+                        if sub in pname_l:
+                            # try to extract numeric value
+                            try:
+                                if hasattr(prop, 'NominalValue') and prop.NominalValue is not None:
+                                    val = prop.NominalValue.wrappedValue
+                                else:
+                                    # skip non single-value properties
+                                    continue
+                                num = float(val)
+                                if num <= 100:
+                                    return num * 1000.0
+                                return num
+                            except Exception:
+                                continue
+            # Quantities
+            if pdef.is_a('IfcElementQuantity'):
+                for qty in getattr(pdef, 'Quantities', []) or []:
+                    qname = getattr(qty, 'Name', '')
+                    if not qname:
+                        continue
+                    qname_l = qname.lower()
+                    for sub in subs:
+                        if sub in qname_l:
+                            try:
+                                val = getattr(qty, 'LengthValue', None) or getattr(qty, 'AreaValue', None) or getattr(qty, 'VolumeValue', None)
+                                if val is None:
+                                    continue
+                                num = float(val)
+                                if num <= 100:
+                                    return num * 1000.0
+                                return num
+                            except Exception:
+                                continue
+        except Exception:
+            continue
     return None
 
 
@@ -413,6 +529,97 @@ def get_opening_dimensions_from_geometry(opening):
     return (None, None)
 
 
+def _to_meters(val):
+    try:
+        v = float(val)
+    except Exception:
+        return None
+    # If value looks like mm (>100) convert to meters
+    if v > 100:
+        return v / 1000.0
+    return v
+
+
+def get_element_centroid(element):
+    """Try to get a 3D point (x,y,z) from an element's representation.
+
+    Returns coordinates in meters (if available) or None.
+    """
+    try:
+        if not hasattr(element, 'Representation') or not element.Representation:
+            return None
+        for rep in element.Representation.Representations:
+            for item in getattr(rep, 'Items', []) or []:
+                # Try common solid with position
+                if item.is_a('IfcExtrudedAreaSolid'):
+                    pos = getattr(item, 'Position', None)
+                    if pos and getattr(pos, 'Location', None) and getattr(pos.Location, 'Coordinates', None):
+                        coords = list(pos.Location.Coordinates)
+                        # coords are in model units (usually meters)
+                        return (float(coords[0]), float(coords[1]), float(coords[2]) if len(coords) > 2 else 0.0)
+                # Try IfcMappedItem -> Location on mapping
+                if item.is_a('IfcMappedItem'):
+                    # mapping source and mapping target
+                    try:
+                        transform = getattr(item, 'MappingSource', None)
+                    except Exception:
+                        transform = None
+        return None
+    except Exception:
+        return None
+
+
+def build_space_bboxes(spaces):
+    """Build simple 2D axis-aligned bounding boxes (xmin,ymin,xmax,ymax) for each space from geometry.
+
+    Uses IfcExtrudedAreaSolid positions and rectangle profile dims when available. Returns dict space_id->bbox (meters).
+    """
+    bboxes = {}
+    for sp in spaces:
+        sp_id = getattr(sp, 'GlobalId', None) or str(id(sp))
+        xmin = ymin = float('inf')
+        xmax = ymax = float('-inf')
+        found = False
+        try:
+            if hasattr(sp, 'Representation') and sp.Representation:
+                for rep in sp.Representation.Representations:
+                    for item in getattr(rep, 'Items', []) or []:
+                        if item.is_a('IfcExtrudedAreaSolid'):
+                            pos = getattr(item, 'Position', None)
+                            if not pos or not getattr(pos, 'Location', None) or not getattr(pos.Location, 'Coordinates', None):
+                                continue
+                            coords = list(pos.Location.Coordinates)
+                            x = float(coords[0])
+                            y = float(coords[1])
+                            profile = getattr(item, 'SweptArea', None)
+                            if profile and profile.is_a('IfcRectangleProfileDef'):
+                                xdim = _to_meters(getattr(profile, 'XDim', None))
+                                ydim = _to_meters(getattr(profile, 'YDim', None))
+                                if xdim is None or ydim is None:
+                                    continue
+                                hx = xdim / 2.0
+                                hy = ydim / 2.0
+                                xmin = min(xmin, x - hx)
+                                ymin = min(ymin, y - hy)
+                                xmax = max(xmax, x + hx)
+                                ymax = max(ymax, y + hy)
+                                found = True
+                            else:
+                                # fallback: treat the position point as footprint
+                                xmin = min(xmin, x)
+                                ymin = min(ymin, y)
+                                xmax = max(xmax, x)
+                                ymax = max(ymax, y)
+                                found = True
+        except Exception:
+            pass
+        if found:
+            bboxes[sp_id] = (xmin, ymin, xmax, ymax)
+        else:
+            bboxes[sp_id] = None
+    return bboxes
+
+
 def analyze_door(door, door_to_spaces=None, opening_for_door=None):
     """Analyze a door: try to get width and report linking spaces.
 
@@ -436,6 +643,15 @@ def analyze_door(door, door_to_spaces=None, opening_for_door=None):
                                 break
                 except Exception:
                     continue
+        except Exception:
+            pass
+
+    # If still None, scan property-sets for any property containing 'width'
+    if width is None:
+        try:
+            found = _find_numeric_by_substring(door, ['width'])
+            if found:
+                width = found
         except Exception:
             pass
 
@@ -465,13 +681,49 @@ def analyze_door(door, door_to_spaces=None, opening_for_door=None):
     }
 
 
-def analyze_stair(stair):
+def analyze_stair(stair, model=None):
     """Analyze a stair element for simple requirements (width check).
+
+    If `stair` is an IfcStairFlight we prefer the Actual Run Width property.
+    If `stair` is an IfcStair, we will search related IfcStairFlight children (via IfcRelAggregates)
+    for the Actual Run Width if it's not present directly on the parent.
 
     Returns dict with name, width_mm, pass bool, issues list.
     """
     name = get_property(stair, "Name") or getattr(stair, "Name", None) or str(stair)
-    width = _get_numeric_property(stair, ["OverallWidth", "Width", "NominalWidth", "StairWidth"])
+    # Prefer ActualRunWidth for IfcStairFlight (found under Dimensions -> Actual Run Width)
+    if stair.is_a('IfcStairFlight'):
+        # try explicit stair flight property names first
+        width = _get_numeric_property(stair, ["ActualRunWidth", "Actual Run Width", "Actual_Run_Width", "RunWidth", "Run Width"])
+        if width is None:
+            # fallback to common width names
+            width = _get_numeric_property(stair, ["OverallWidth", "Width", "NominalWidth", "StairWidth"])
+    else:
+        # For IfcStair (assembled), try direct properties first
+        width = _get_numeric_property(stair, ["OverallWidth", "Width", "NominalWidth", "StairWidth"])
+        # If still None and model provided, search child IfcStairFlight entities via IfcRelAggregates
+        if width is None and model is not None:
+            try:
+                for rel in model.by_type('IfcRelAggregates'):
+                    try:
+                        if getattr(rel, 'RelatingObject', None) is stair:
+                            for child in getattr(rel, 'RelatedObjects', []) or []:
+                                try:
+                                    if child.is_a('IfcStairFlight'):
+                                        w = _get_numeric_property(child, ["ActualRunWidth", "Actual Run Width", "Actual_Run_Width", "RunWidth", "Run Width"])
+                                        if w is None:
+                                            w = _find_numeric_by_substring(child, ['width'])
+                                        if w:
+                                            width = w
+                                            break
+                                except Exception:
+                                    continue
+                            if width is not None:
+                                break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
 
     issues = []
     STAIR_MIN_WIDTH = 1000  # default mm, adjust to BR18 if needed
@@ -480,6 +732,19 @@ def analyze_stair(stair):
     else:
         if width < STAIR_MIN_WIDTH:
             issues.append(f"width {width:.0f}mm < {STAIR_MIN_WIDTH}mm")
+
+    # If width still unknown, try substring search for 'width' in PSets/quantities
+    if width is None:
+        try:
+            found = _find_numeric_by_substring(stair, ['width'])
+            if found:
+                width = found
+                # re-evaluate issues
+                issues = []
+                if width < STAIR_MIN_WIDTH:
+                    issues.append(f"width {width:.0f}mm < {STAIR_MIN_WIDTH}mm")
+        except Exception:
+            pass
 
     return {
         "name": name,
@@ -586,9 +851,9 @@ def main():
             dres = analyze_door(door, door_to_spaces, opening_for_door=opening)
             analyzed_doors.append(dres)
 
-        # Analyze stairs in the model
+        # Analyze stairs in the model (pass model so analyze_stair can search children)
         stairs = model.by_type("IfcStair") + model.by_type("IfcStairFlight")
-        analyzed_stairs = [analyze_stair(s) for s in stairs]
+        analyzed_stairs = [analyze_stair(s, model=model) for s in stairs]
 
         # Build summary outputs requested
         failing_doors = [d for d in analyzed_doors if d["issues"]]
@@ -601,8 +866,10 @@ def main():
                 issues.append(checks["width"]["message"])
             if not checks["elongation"]["pass"]:
                 issues.append(checks["elongation"]["message"])
-            if not checks["links_rooms"]["pass"]:
-                issues.append(checks["links_rooms"]["message"])
+            # If the space is explicitly named/typed as a corridor, treat the links check as informational
+            if not (analysis.get('is_named_corridor') or analysis.get('is_typed_corridor')):
+                if not checks["links_rooms"]["pass"]:
+                    issues.append(checks["links_rooms"]["message"])
             if issues:
                 failing_corridors.append({
                     "name": analysis.get("name"),
@@ -615,29 +882,37 @@ def main():
         print("\n" + "="*70)
         print("Final Summary:")
         print("="*70)
-        # Doors
-        print(f"Total doors in model: {len(analyzed_doors)}")
-        print(f"Doors failing requirements: {len(failing_doors)}")
+        # Doors - exact requested order and detail
+        print(f"Amount of doors in model: {len(analyzed_doors)}")
+        print(f"Amount of doors that don't fulfill the requirements: {len(failing_doors)}")
         if failing_doors:
-            print("Failing doors and issues:")
+            print("The names of the doors and what is not right with them:")
             for d in failing_doors:
-                print(f" - {d['name']}: {', '.join(d['issues'])}")
+                name = d.get('name') or getattr(d.get('entity', None), 'GlobalId', str(d))
+                issues = d.get('issues') or []
+                print(f" - {name}: {', '.join(issues)}")
+        else:
+            print("No failing doors.")
 
         # Corridors
-        print(f"\nTotal corridors identified: {len(potential_corridors)}")
-        print(f"Corridors failing requirements: {len(failing_corridors)}")
+        print(f"\nAmount of corridors: {len(potential_corridors)}")
+        print(f"Amount of corridors that don't fulfill the requirements: {len(failing_corridors)}")
         if failing_corridors:
-            print("Failing corridors and issues:")
+            print("The names of the corridors and what is not right with them:")
             for c in failing_corridors:
                 print(f" - {c['name']}: {', '.join(c['issues'])}")
+        else:
+            print("No failing corridors.")
 
         # Stairs
-        print(f"\nTotal stairs in model: {len(analyzed_stairs)}")
-        print(f"Stairs failing requirements: {len(failing_stairs)}")
+        print(f"\nAmount of stairs: {len(analyzed_stairs)}")
+        print(f"Amount of stairs that don't fulfill the requirements: {len(failing_stairs)}")
         if failing_stairs:
-            print("Failing stairs and issues:")
+            print("The names of the stairs and what is not right with them:")
             for s in failing_stairs:
                 print(f" - {s['name']}: {', '.join(s['issues'])}")
+        else:
+            print("No failing stairs.")
         
         print(f"\n{'='*70}")
         print(f"Analysis Summary:")
