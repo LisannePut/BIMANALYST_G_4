@@ -249,113 +249,86 @@ def build_opening_to_spaces_map(model):
 def build_space_linkages_via_doors(model, spaces):
     """Build mapping from each space to the set of other spaces it's linked to via doors/openings.
 
-    Strategy:
-      - Use IfcRelSpaceBoundary to map openings -> spaces
-      - Use IfcRelFillsElement to map openings <-> doors (door fills opening)
-      - For each door, collect spaces touching the opening and connect them to each other
+    Since this model lacks IfcRelSpaceBoundary relations, use GEOMETRY to infer connectivity:
+      - For each door/opening, find the 2 nearest spaces by centroid distance
+      - Link those two spaces as adjacent
+    
     Returns: dict space -> set(other_spaces)
     """
-    opening_to_spaces = build_opening_to_spaces_map(model)
+    # Build space centroids and bboxes for geometric analysis
+    space_bboxes = build_space_bboxes(spaces)
+    space_centroids = {}
+    for sp in spaces:
+        sp_id = getattr(sp, 'GlobalId', None) or str(id(sp))
+        cent = get_element_centroid(sp)
+        if cent:
+            space_centroids[sp_id] = cent
+
     # door_id (GlobalId) -> set(space GlobalId)
     door_to_spaces = {}
     # door_id -> opening element (object) if known
     door_to_opening = {}
 
-    # Relates openings to doors/windows (the filling element)
+    # Create a map of door GlobalId -> door object for lookup
+    door_by_id = {}
+    for door in model.by_type("IfcDoor"):
+        door_id = getattr(door, 'GlobalId', None)
+        if door_id:
+            door_by_id[door_id] = door
+
+    # Collect all doors and their openings via IfcRelFillsElement
+    # Strategy: For each opening, find which spaces' bboxes contain it, and check nearby spaces
     try:
         for rel in model.by_type("IfcRelFillsElement"):
             try:
                 opening = rel.RelatingOpeningElement
                 element = rel.RelatedBuildingElement
-                # Only consider mapping for actual doors
-                if opening and element and element.is_a('IfcDoor'):
-                    # prefer GlobalId for stable keys; skip if missing
-                    door_global_id = getattr(element, 'GlobalId', None)
-                    if not door_global_id:
-                        # skip elements without GlobalId to avoid transient id proliferation
-                        continue
+                # Only consider actual doors
+                if not (opening and element and element.is_a('IfcDoor')):
+                    continue
+                
+                door_global_id = getattr(element, 'GlobalId', None)
+                if not door_global_id:
+                    continue
 
-                    opening_key = getattr(opening, 'GlobalId', None) or str(id(opening))
-                    # try direct mapping first
-                    spaces_touching = set(opening_to_spaces.get(opening_key, set()))
-                    # fallback: find space boundaries that reference a parent wall/element that contains this opening
-                    if not spaces_touching:
-                        try:
-                            for relb in model.by_type('IfcRelSpaceBoundary'):
-                                try:
-                                    related = relb.RelatedBuildingElement
-                                    if not related:
-                                        continue
-                                    # direct match
-                                    if getattr(related, 'GlobalId', None) == getattr(opening, 'GlobalId', None):
-                                        spaces_touching.add(getattr(relb.RelatingSpace, 'GlobalId', None) or str(id(relb.RelatingSpace)))
-                                        continue
-                                    # check if related element has openings that reference our opening
-                                    for ro in getattr(related, 'HasOpenings', []) or []:
-                                        for o in getattr(ro, 'RelatedOpeningElements', []) or []:
-                                            if getattr(o, 'GlobalId', None) == getattr(opening, 'GlobalId', None):
-                                                spaces_touching.add(getattr(relb.RelatingSpace, 'GlobalId', None) or str(id(relb.RelatingSpace)))
-                                                break
-                                except Exception:
-                                    continue
-                        except Exception:
-                            pass
-                    # geometry containment fallback: try opening centroid inside space bboxes
-                    if not spaces_touching:
-                        try:
-                            # build space bboxes once
-                            if 'space_bboxes' not in locals():
-                                space_bboxes = build_space_bboxes(spaces)
-                            # get opening centroid
-                            cent = get_element_centroid(opening)
-                            if cent:
-                                cx, cy, cz = cent
-                                for spid, bbox in space_bboxes.items():
-                                    if not bbox:
-                                        continue
-                                    xmin, ymin, xmax, ymax = bbox
-                                    if xmin <= cx <= xmax and ymin <= cy <= ymax:
-                                        spaces_touching.add(spid)
-                        except Exception:
-                            pass
-                    if spaces_touching:
-                        door_to_spaces.setdefault(door_global_id, set()).update(spaces_touching)
-                        door_to_opening[door_global_id] = opening
+                # Get opening centroid
+                opening_cent = get_element_centroid(opening)
+                if not opening_cent:
+                    continue
+
+                # Strategy 1: Check if opening is inside any space's bbox
+                spaces_touching = set()
+                for sp_id, bbox in space_bboxes.items():
+                    if bbox and len(bbox) >= 4:
+                        xmin, ymin, xmax, ymax = bbox[0], bbox[1], bbox[2], bbox[3]
+                        # Check if opening centroid is within this space's bbox
+                        if xmin <= opening_cent[0] <= xmax and ymin <= opening_cent[1] <= ymax:
+                            spaces_touching.add(sp_id)
+                
+                # Strategy 2: If no spaces contain it, find nearest spaces (with higher distance threshold)
+                if not spaces_touching:
+                    distances = []
+                    for sp_id, cent in space_centroids.items():
+                        dist = math.sqrt((opening_cent[0] - cent[0])**2 + 
+                                       (opening_cent[1] - cent[1])**2 + 
+                                       (opening_cent[2] - cent[2])**2)
+                        distances.append((dist, sp_id))
+                    
+                    distances.sort()
+                    # Take up to 2 spaces if they're within a reasonable distance (e.g., 20 meters = 20000mm)
+                    for dist, sp_id in distances:
+                        if dist <= 20000 and len(spaces_touching) < 2:
+                            spaces_touching.add(sp_id)
+
+                if spaces_touching:
+                    door_to_spaces[door_global_id] = spaces_touching
+                    door_to_opening[door_global_id] = opening
             except Exception:
                 continue
     except Exception:
         pass
 
-    # Also handle cases where the door itself is directly referenced in a space boundary
-    try:
-        for rel in model.by_type("IfcRelSpaceBoundary"):
-            try:
-                related = rel.RelatedBuildingElement
-                space = rel.RelatingSpace
-                if related and space and related.is_a("IfcDoor"):
-                    door_id = getattr(related, 'GlobalId', None) or str(id(related))
-                    door_to_spaces.setdefault(door_id, set()).add(getattr(space, 'GlobalId', None) or str(id(space)))
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Additional mapping: use containment relations to find spaces a door belongs to
-    try:
-        for rel in model.by_type("IfcRelContainedInSpatialStructure"):
-            try:
-                space = rel.RelatingStructure
-                for elem in rel.RelatedElements:
-                    if elem and elem.is_a("IfcDoor"):
-                        door_id = getattr(elem, 'GlobalId', None) or str(id(elem))
-                        door_to_spaces.setdefault(door_id, set()).add(getattr(space, 'GlobalId', None) or str(id(space)))
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    # Now build space adjacency via doors
-    # Build adjacency keyed by space GlobalId
+    # Build space adjacency from door connections
     space_linked = {}
     for door_id, sset in door_to_spaces.items():
         s_list = list(sset)
@@ -406,10 +379,13 @@ def _get_numeric_property(entity, names):
         except Exception:
             continue
 
-    # Try without specifying a property set (search all PSets)
-    for n in names:
-        val = get_property(entity, n)
-        if val is not None:
+    # Try common property set names explicitly first (your model uses 'Dimensions')
+    psets = ["Dimensions", "Pset_DoorCommon", "PSet_DoorCommon", "Pset_StairCommon", "Pset_StairFlightCommon"]
+    for pset in psets:
+        for n in names:
+            val = get_property(entity, n, pset)
+            if val is None:
+                continue
             try:
                 num = float(val)
             except Exception:
@@ -418,13 +394,10 @@ def _get_numeric_property(entity, names):
                 return num * 1000.0
             return num
 
-    # Common property set names to try explicitly (your model uses 'Dimensions')
-    psets = ["Dimensions", "Pset_DoorCommon", "PSet_DoorCommon", "Pset_StairCommon", "Dimensions "]
-    for pset in psets:
-        for n in names:
-            val = get_property(entity, n, pset)
-            if val is None:
-                continue
+    # Try without specifying a property set (search all PSets)
+    for n in names:
+        val = get_property(entity, n)
+        if val is not None:
             try:
                 num = float(val)
             except Exception:
@@ -543,27 +516,80 @@ def _to_meters(val):
 def get_element_centroid(element):
     """Try to get a 3D point (x,y,z) from an element's representation.
 
-    Returns coordinates in meters (if available) or None.
+    For IfcExtrudedAreaSolid, compute centroid from base position + profile center + height/2.
+    Returns coordinates in model units (usually meters) or None.
     """
     try:
         if not hasattr(element, 'Representation') or not element.Representation:
             return None
         for rep in element.Representation.Representations:
             for item in getattr(rep, 'Items', []) or []:
-                # Try common solid with position
+                # IfcExtrudedAreaSolid: compute centroid from profile + extrusion
                 if item.is_a('IfcExtrudedAreaSolid'):
-                    pos = getattr(item, 'Position', None)
-                    if pos and getattr(pos, 'Location', None) and getattr(pos.Location, 'Coordinates', None):
-                        coords = list(pos.Location.Coordinates)
-                        # coords are in model units (usually meters)
-                        return (float(coords[0]), float(coords[1]), float(coords[2]) if len(coords) > 2 else 0.0)
-                # Try IfcMappedItem -> Location on mapping
-                if item.is_a('IfcMappedItem'):
-                    # mapping source and mapping target
                     try:
-                        transform = getattr(item, 'MappingSource', None)
+                        pos = getattr(item, 'Position', None)
+                        if not pos:
+                            continue
+                        
+                        loc = getattr(pos, 'Location', None)
+                        if not loc or not getattr(loc, 'Coordinates', None):
+                            continue
+                        
+                        base_coords = list(loc.Coordinates)
+                        base_x = float(base_coords[0])
+                        base_y = float(base_coords[1])
+                        base_z = float(base_coords[2]) if len(base_coords) > 2 else 0.0
+                        
+                        # Get extrusion height
+                        height = float(getattr(item, 'Height', 0)) if hasattr(item, 'Height') else 0
+                        
+                        # Get profile centroid if available (RectangleProfileDef)
+                        profile = getattr(item, 'SweptArea', None)
+                        if profile and profile.is_a('IfcRectangleProfileDef'):
+                            # Centroid relative to profile's position
+                            profile_pos = getattr(profile, 'Position', None)
+                            x_dim = float(getattr(profile, 'XDim', 0))
+                            y_dim = float(getattr(profile, 'YDim', 0))
+                            # Profile center is at (x_dim/2, y_dim/2) relative to profile position
+                            if profile_pos and getattr(profile_pos, 'Location', None):
+                                p_coords = list(profile_pos.Location.Coordinates)
+                                profile_x = float(p_coords[0]) if len(p_coords) > 0 else 0
+                                profile_y = float(p_coords[1]) if len(p_coords) > 1 else 0
+                            else:
+                                profile_x = 0
+                                profile_y = 0
+                            
+                            cent_x = base_x + profile_x + x_dim / 2.0
+                            cent_y = base_y + profile_y + y_dim / 2.0
+                            cent_z = base_z + height / 2.0
+                            return (cent_x, cent_y, cent_z)
+                        else:
+                            # No profile info: use base location + height/2
+                            return (base_x, base_y, base_z + height / 2.0)
                     except Exception:
-                        transform = None
+                        pass
+                
+                # IfcFacetedBrep: try to extract vertices and compute centroid
+                if item.is_a('IfcFacetedBrep'):
+                    try:
+                        outer_shell = getattr(item, 'OuterBoundary', None)
+                        if outer_shell:
+                            vertices = []
+                            for bound in getattr(outer_shell, 'CfaceBounds', []):
+                                if hasattr(bound, 'Bound'):
+                                    loop = bound.Bound
+                                    for pt in getattr(loop, 'PolygonalBoundary', []):
+                                        if hasattr(pt, 'Coordinates'):
+                                            coords = list(pt.Coordinates)
+                                            vertices.append((float(coords[0]), float(coords[1]), float(coords[2]) if len(coords) > 2 else 0))
+                            if vertices:
+                                x_avg = sum(v[0] for v in vertices) / len(vertices)
+                                y_avg = sum(v[1] for v in vertices) / len(vertices)
+                                z_avg = sum(v[2] for v in vertices) / len(vertices)
+                                return (x_avg, y_avg, z_avg)
+                    except Exception:
+                        pass
+        
         return None
     except Exception:
         return None
@@ -626,6 +652,8 @@ def analyze_door(door, door_to_spaces=None, opening_for_door=None):
     Returns dict with name, width_mm, pass (bool), issues list.
     """
     name = get_property(door, "Name") or getattr(door, "Name", None) or str(door)
+    door_id = getattr(door, 'GlobalId', None) or str(id(door))
+    full_name = f"{name} [{door_id}]" if door_id else name
     # try common property names
     width = _get_numeric_property(door, ["OverallWidth", "Width", "NominalWidth", "DoorWidth"])
 
@@ -674,7 +702,7 @@ def analyze_door(door, door_to_spaces=None, opening_for_door=None):
             issues.append(f"width {width:.0f}mm < {DOOR_MIN_WIDTH}mm")
 
     return {
-        "name": name,
+        "name": full_name,
         "width_mm": width,
         "linked_spaces": linked_spaces,
         "issues": issues
@@ -685,32 +713,37 @@ def analyze_stair(stair, model=None):
     """Analyze a stair element for simple requirements (width check).
 
     If `stair` is an IfcStairFlight we prefer the Actual Run Width property.
-    If `stair` is an IfcStair, we will search related IfcStairFlight children (via IfcRelAggregates)
-    for the Actual Run Width if it's not present directly on the parent.
+    If `stair` is an IfcStair, we will search related IfcStairFlight children
+    (by IfcRelAggregates or by name pattern matching) for the Actual Run Width.
+    Fallback: use TreadLength from parent IfcStair Dimensions PSet (proxy for run width).
 
     Returns dict with name, width_mm, pass bool, issues list.
     """
     name = get_property(stair, "Name") or getattr(stair, "Name", None) or str(stair)
+    stair_id = getattr(stair, 'GlobalId', None) or str(id(stair))
+    full_name = f"{name} [{stair_id}]" if stair_id else name
     # Prefer ActualRunWidth for IfcStairFlight (found under Dimensions -> Actual Run Width)
     if stair.is_a('IfcStairFlight'):
-        # try explicit stair flight property names first
-        width = _get_numeric_property(stair, ["ActualRunWidth", "Actual Run Width", "Actual_Run_Width", "RunWidth", "Run Width"])
+        # try explicit stair flight property names first — "Actual Run Width" is the key property in Dimensions PSet
+        width = _get_numeric_property(stair, ["Actual Run Width", "ActualRunWidth", "Actual_Run_Width", "Run Width", "RunWidth"])
         if width is None:
             # fallback to common width names
             width = _get_numeric_property(stair, ["OverallWidth", "Width", "NominalWidth", "StairWidth"])
     else:
         # For IfcStair (assembled), try direct properties first
         width = _get_numeric_property(stair, ["OverallWidth", "Width", "NominalWidth", "StairWidth"])
-        # If still None and model provided, search child IfcStairFlight entities via IfcRelAggregates
+        # If still None and model provided, search child IfcStairFlight entities
         if width is None and model is not None:
             try:
+                stair_name = name or ""
+                # Try IfcRelAggregates first
                 for rel in model.by_type('IfcRelAggregates'):
                     try:
                         if getattr(rel, 'RelatingObject', None) is stair:
                             for child in getattr(rel, 'RelatedObjects', []) or []:
                                 try:
                                     if child.is_a('IfcStairFlight'):
-                                        w = _get_numeric_property(child, ["ActualRunWidth", "Actual Run Width", "Actual_Run_Width", "RunWidth", "Run Width"])
+                                        w = _get_numeric_property(child, ["Actual Run Width", "ActualRunWidth", "Actual_Run_Width"])
                                         if w is None:
                                             w = _find_numeric_by_substring(child, ['width'])
                                         if w:
@@ -722,8 +755,28 @@ def analyze_stair(stair, model=None):
                                 break
                     except Exception:
                         continue
+                # Fallback: match IfcStairFlight children by name pattern (e.g., "Assembled Stair:Stair:1282665" -> "Assembled Stair:Stair:1282665 Run X")
+                if width is None and stair_name:
+                    try:
+                        for sf in model.by_type('IfcStairFlight'):
+                            sf_name = getattr(sf, 'Name', '') or ""
+                            if stair_name in sf_name and ' Run ' in sf_name:
+                                w = _get_numeric_property(sf, ["Actual Run Width", "ActualRunWidth", "Actual_Run_Width"])
+                                if w is None:
+                                    w = _find_numeric_by_substring(sf, ['width'])
+                                if w:
+                                    width = w
+                                    break
+                    except Exception:
+                        pass
             except Exception:
                 pass
+        # Final fallback: use TreadLength from Pset_StairCommon or Dimensions if width still unknown
+        if width is None:
+            width = _get_numeric_property(stair, ["TreadLength", "Tread Length", "Tread_Length"])
+        # Final fallback: if still no width, try TreadLength from Dimensions PSet (proxy for run width on parent IfcStair)
+        if width is None:
+            width = _get_numeric_property(stair, ["TreadLength", "Tread Length", "Tread_Length"])
 
     issues = []
     STAIR_MIN_WIDTH = 1000  # default mm, adjust to BR18 if needed
@@ -747,7 +800,7 @@ def analyze_stair(stair, model=None):
             pass
 
     return {
-        "name": name,
+        "name": full_name,
         "width_mm": width,
         "issues": issues
     }
@@ -758,14 +811,19 @@ def main():
     ifc_file_path = os.path.join(os.path.dirname(__file__), "model", "25-16-D-ARCH.ifc")
     
     try:
-        print("=== Corridor Analysis Report ===\n")
+        # Set VERBOSE to True for detailed per-space debugging output.
+        VERBOSE = False
+        # Top-level heading (only printed in verbose mode)
+        if VERBOSE:
+            print("=== Corridor Analysis Report ===\n")
         
         # Load the IFC file
         model = ifcopenshell.open(ifc_file_path)
         
         # Get all spaces
         spaces = model.by_type("IfcSpace")
-        print(f"Analyzing {len(spaces)} spaces...\n")
+        if VERBOSE:
+            print(f"Analyzing {len(spaces)} spaces...\n")
 
         # Track spaces analyzed
         spaces_analyzed = 0
@@ -776,7 +834,8 @@ def main():
 
         # Diagnostic: how many doors map to spaces via relations?
         mapped_doors_count = sum(1 for k, v in door_to_spaces.items() if v)
-        print(f"Door->space relations found for {mapped_doors_count} doors (of {len(model.by_type('IfcDoor'))})")
+        if VERBOSE:
+            print(f"Door->space relations found for {mapped_doors_count} doors (of {len(model.by_type('IfcDoor'))})")
 
         # First pass: collect information about all spaces and identify corridors
         for space in spaces:
@@ -812,35 +871,36 @@ def main():
                 potential_corridors.append((space, analysis, inferred_reason))
 
         # After checking all spaces, report potential corridors
-        if potential_corridors:
-            print(f"Found {len(potential_corridors)} potential corridors/hallways\n")
-            print("Detailed Analysis:")
-            print("="*70)
+        if VERBOSE:
+            if potential_corridors:
+                print(f"Found {len(potential_corridors)} potential corridors/hallways\n")
+                print("Detailed Analysis:")
+                print("="*70)
 
-            for space, analysis, reason in potential_corridors:
-                spaces_analyzed += 1
-                checks = check_requirements(analysis)
+                for space, analysis, reason in potential_corridors:
+                    spaces_analyzed += 1
+                    checks = check_requirements(analysis)
 
-                print(f"\nSpace #{spaces_analyzed}: {analysis['name']}")
-                if analysis["type"]:
-                    print(f"Type: {analysis['type']}")
-                if reason:
-                    print(f"Identified as corridor because: {reason}")
-                print("-"*70)
+                    print(f"\nSpace #{spaces_analyzed}: {analysis['name']}")
+                    if analysis["type"]:
+                        print(f"Type: {analysis['type']}")
+                    if reason:
+                        print(f"Identified as corridor because: {reason}")
+                    print("-"*70)
 
-                # Print all checks with their results
-                print("Requirements Check:")
-                for check_name, check in checks.items():
-                    if check_name in ("area", "identification"):
-                        # informational only
-                        print(f"\n  {check_name.title()}: {check['message']}")
-                    else:
-                        status = "✓ PASS" if check["pass"] else "✗ FAIL"
-                        print(f"\n  {check_name.title()}: {status}")
-                        print(f"    {check['message']}")
-                        print(f"    Requirement: {check['requirement']}")
-        else:
-            print("No corridors or hallways identified in the model.")
+                    # Print all checks with their results
+                    print("Requirements Check:")
+                    for check_name, check in checks.items():
+                        if check_name in ("area", "identification"):
+                            # informational only
+                            print(f"\n  {check_name.title()}: {check['message']}")
+                        else:
+                            status = "✓ PASS" if check["pass"] else "✗ FAIL"
+                            print(f"\n  {check_name.title()}: {status}")
+                            print(f"    {check['message']}")
+                            print(f"    Requirement: {check['requirement']}")
+            else:
+                print("No corridors or hallways identified in the model.")
 
         # Analyze doors in the model
         doors = model.by_type("IfcDoor")
@@ -852,8 +912,29 @@ def main():
             analyzed_doors.append(dres)
 
         # Analyze stairs in the model (pass model so analyze_stair can search children)
-        stairs = model.by_type("IfcStair") + model.by_type("IfcStairFlight")
-        analyzed_stairs = [analyze_stair(s, model=model) for s in stairs]
+        # Filter out duplicate IfcStair variants (:2, :3, :4 suffixes are Revit duplicates)
+        # Also filter IfcStairFlight run duplicates (e.g., "Run 1:2", "Run 1:3" are duplicates of "Run 1")
+        all_stairs = model.by_type("IfcStair") + model.by_type("IfcStairFlight")
+        stairs_filtered = []
+        for stair in all_stairs:
+            name = getattr(stair, 'Name', '')
+            # Skip IfcStair duplicates ending in :2, :3, :4 (Revit export artifacts)
+            if stair.is_a('IfcStair') and name and name[-1].isdigit() and ':' in name:
+                last_part = name.rsplit(':', 1)[-1]
+                if last_part.isdigit() and int(last_part) > 1:
+                    continue  # Skip this duplicate
+            # Skip IfcStairFlight run duplicates like "Run 1:2", "Run 1:3" 
+            # (keep only base runs like "Run 1", "Run 2", etc without the :2, :3 suffixes)
+            if stair.is_a('IfcStairFlight') and name and ' Run ' in name:
+                # Extract the run number part after " Run "
+                run_part = name.split(' Run ', 1)[1] if ' Run ' in name else ''
+                if run_part and ':' in run_part and run_part[-1].isdigit():
+                    last_run_part = run_part.rsplit(':', 1)[-1]
+                    if last_run_part.isdigit() and int(last_run_part) > 1:
+                        continue  # Skip run duplicates like "Run 1:2", "Run 1:3"
+            stairs_filtered.append(stair)
+        
+        analyzed_stairs = [analyze_stair(s, model=model) for s in stairs_filtered]
 
         # Build summary outputs requested
         failing_doors = [d for d in analyzed_doors if d["issues"]]
@@ -861,36 +942,47 @@ def main():
         for space, analysis, reason in potential_corridors:
             # determine corridor-specific issues
             checks = check_requirements(analysis)
+            # Corridor requirement: 2 out of 3 must pass (width, elongation, links)
+            # Count how many pass
+            passing = 0
             issues = []
-            if not checks["width"]["pass"]:
+            
+            if checks["width"]["pass"]:
+                passing += 1
+            else:
                 issues.append(checks["width"]["message"])
-            if not checks["elongation"]["pass"]:
+            
+            if checks["elongation"]["pass"]:
+                passing += 1
+            else:
                 issues.append(checks["elongation"]["message"])
-            # If the space is explicitly named/typed as a corridor, treat the links check as informational
-            if not (analysis.get('is_named_corridor') or analysis.get('is_typed_corridor')):
-                if not checks["links_rooms"]["pass"]:
-                    issues.append(checks["links_rooms"]["message"])
-            if issues:
+            
+            if checks["links_rooms"]["pass"]:
+                passing += 1
+            else:
+                issues.append(checks["links_rooms"]["message"])
+            
+            # Corridor fails only if fewer than 2 checks pass
+            if passing < 2:
+                space_id = getattr(space, 'GlobalId', '')
                 failing_corridors.append({
-                    "name": analysis.get("name"),
+                    "name": f"{analysis.get('name')} [{space_id}]",
                     "issues": issues
                 })
 
         failing_stairs = [s for s in analyzed_stairs if s["issues"]]
 
-        # Print final summary as requested
-        print("\n" + "="*70)
-        print("Final Summary:")
-        print("="*70)
-        # Doors - exact requested order and detail
+        # (replaced by minimal final summary block below)
+        
+        # Final summary: print only the outputs requested by the user
+        # Doors
         print(f"Amount of doors in model: {len(analyzed_doors)}")
         print(f"Amount of doors that don't fulfill the requirements: {len(failing_doors)}")
         if failing_doors:
             print("The names of the doors and what is not right with them:")
             for d in failing_doors:
-                name = d.get('name') or getattr(d.get('entity', None), 'GlobalId', str(d))
                 issues = d.get('issues') or []
-                print(f" - {name}: {', '.join(issues)}")
+                print(f" - {d.get('name')}: {', '.join(issues)}")
         else:
             print("No failing doors.")
 
@@ -913,12 +1005,6 @@ def main():
                 print(f" - {s['name']}: {', '.join(s['issues'])}")
         else:
             print("No failing stairs.")
-        
-        print(f"\n{'='*70}")
-        print(f"Analysis Summary:")
-        print(f"{'='*70}")
-        print(f"Total spaces in model: {len(spaces)}")
-        print(f"Potential corridors analyzed: {spaces_analyzed}")
         
     except Exception as e:
         print(f"Error: {e}")
