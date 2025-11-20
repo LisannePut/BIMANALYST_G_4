@@ -619,12 +619,20 @@ def build_space_bboxes(spaces):
                             y = float(coords[1])
                             profile = getattr(item, 'SweptArea', None)
                             if profile and profile.is_a('IfcRectangleProfileDef'):
-                                xdim = _to_meters(getattr(profile, 'XDim', None))
-                                ydim = _to_meters(getattr(profile, 'YDim', None))
-                                if xdim is None or ydim is None:
+                                # Convert profile dims to model units (this IFC uses millimeters here)
+                                try:
+                                    px = getattr(profile, 'XDim', None)
+                                    py = getattr(profile, 'YDim', None)
+                                    if px is None or py is None:
+                                        continue
+                                    # If values look like meters (<100) convert to mm, otherwise assume already mm
+                                    xdim_mm = float(px) * 1000.0 if float(px) <= 100 else float(px)
+                                    ydim_mm = float(py) * 1000.0 if float(py) <= 100 else float(py)
+                                except Exception:
                                     continue
-                                hx = xdim / 2.0
-                                hy = ydim / 2.0
+                                hx = xdim_mm / 2.0
+                                hy = ydim_mm / 2.0
+                                # Ensure position coordinates are in the same unit (model uses mm)
                                 xmin = min(xmin, x - hx)
                                 ymin = min(ymin, y - hy)
                                 xmax = max(xmax, x + hx)
