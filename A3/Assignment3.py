@@ -1,6 +1,8 @@
 import ifcopenshell
+import ifcopenshell.geom
 import os
 import math
+import numpy as np
 
 # Config
 IFC_PATH = os.path.join(os.path.dirname(__file__), "model", "25-16-D-ARCH.ifc")
@@ -9,6 +11,10 @@ STAIR_MIN = 1000
 BUFFER_BBOX = 1000.0
 NEAREST_MAX = 30000.0
 
+# Geometry settings for door midpoint calculation
+GEOM_SETTINGS = ifcopenshell.geom.settings()
+GEOM_SETTINGS.set(GEOM_SETTINGS.USE_WORLD_COORDS, True)
+
 
 def to_mm(v):
     try:
@@ -16,6 +22,61 @@ def to_mm(v):
     except Exception:
         return None
     return f if f > 100 else f * 1000.0
+
+
+def extract_dimensions_from_geometry(sp):
+    """Extract width and length from IfcSpace geometry using 3D vertices.
+    
+    ifcopenshell.geom returns coordinates in meters, but IFC file units are millimeters,
+    so we multiply by 1000 to convert.
+    """
+    try:
+        verts = get_vertices(sp)
+        if verts is not None and len(verts) > 0:
+            # Convert from meters to millimeters (multiply by 1000)
+            verts = verts * 1000.0
+            minv = verts.min(axis=0)
+            maxv = verts.max(axis=0)
+            dims = maxv - minv
+            # Return (longer dim, shorter dim) as (length, width)
+            dim_sorted = sorted(dims[:2])  # Take X, Y (ignore Z height)
+            if dim_sorted[1] > 0:  # Ensure width > 0
+                return dim_sorted[1], dim_sorted[0]
+    except Exception:
+        pass
+    
+    return 0, 0
+
+
+
+def get_vertices(product):
+    """Extract vertices from IFC product using world coordinates."""
+    try:
+        shape = ifcopenshell.geom.create_shape(GEOM_SETTINGS, product)
+        verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
+        return verts
+    except Exception:
+        return None
+
+
+def get_bbox(product):
+    """Get axis-aligned bounding box (min, max) for a product."""
+    verts = get_vertices(product)
+    if verts is None or len(verts) == 0:
+        return None, None
+    minv = verts.min(axis=0)
+    maxv = verts.max(axis=0)
+    return minv, maxv
+
+
+def get_door_midpoint(door):
+    """Compute midpoint of door's bounding box."""
+    minv, maxv = get_bbox(door)
+    if minv is None or maxv is None:
+        return None
+    mid = (minv + maxv) / 2.0
+    return mid
+
 
 
 def get_numeric(entity, names):
@@ -79,6 +140,10 @@ def centroid_from_extruded(item):
         x = float(coords[0]) if coords else 0.0
         y = float(coords[1]) if len(coords) > 1 else 0.0
         z = float(coords[2]) if len(coords) > 2 else 0.0
+        # Convert location coords to mm (they come in meters or model units)
+        x = x if x > 100 else x * 1000.0
+        y = y if y > 100 else y * 1000.0
+        z = z if z > 100 else z * 1000.0
         prof = getattr(item, 'SweptArea', None)
         if prof and prof.is_a('IfcRectangleProfileDef'):
             xd = float(getattr(prof, 'XDim', 0) or 0)
@@ -92,13 +157,14 @@ def centroid_from_extruded(item):
 
 
 def get_element_centroid(elem):
-    if not getattr(elem, 'Representation', None):
-        return None
-    for rep in elem.Representation.Representations:
-        for it in getattr(rep, 'Items', []) or []:
-            c = centroid_from_extruded(it)
-            if c:
-                return c
+    """Get centroid using ifcopenshell.geom (same method as debug script)."""
+    try:
+        verts = get_vertices(elem)
+        if verts is not None and len(verts) > 0:
+            verts = verts * 1000.0  # Convert to mm
+            return verts.mean(axis=0)
+    except Exception:
+        pass
     return None
 
 
@@ -130,52 +196,68 @@ def build_space_bboxes(spaces):
 
 
 def build_space_linkages(model, spaces):
-    bboxes = build_space_bboxes(spaces)
-    centroids = { (getattr(s, 'GlobalId', None) or str(id(s))): get_element_centroid(s) for s in spaces }
-    door_to_spaces = {}
-    door_to_opening = {}
+    """Check if hallways connect directly to stair spaces via doors."""
+    # Identify stair and hallway spaces
+    stair_spaces = {}
+    hallway_spaces = {}
+    
+    spaces_list = list(spaces)
+    for sp in spaces_list:
+        sid = getattr(sp, 'GlobalId', None) or str(id(sp))
+        name = (getattr(sp, 'Name', None) or '').lower()
+        if 'stair' in name:
+            stair_spaces[sid] = sp
+        elif 'hallway' in name:
+            hallway_spaces[sid] = sp
+    
+    # Track which hallways connect to stairs
+    space_linked_to_stairs = {sid: False for sid in hallway_spaces}
+    
+    # For each door, find which spaces it connects
     for rel in model.by_type('IfcRelFillsElement'):
         opening = getattr(rel, 'RelatingOpeningElement', None)
-        elem = getattr(rel, 'RelatedBuildingElement', None)
-        if not (opening and elem and elem.is_a('IfcDoor')):
+        door = getattr(rel, 'RelatedBuildingElement', None)
+        if not (opening and door and door.is_a('IfcDoor')):
             continue
-        did = getattr(elem, 'GlobalId', None)
-        oc = get_element_centroid(opening) or get_element_centroid(elem)
-        if not oc:
+        
+        # Get opening centroid (try opening first, then door as fallback)
+        oc = get_element_centroid(opening)
+        if oc is None:
+            oc = get_element_centroid(door)
+        if oc is None:
             continue
-        touching = set()
-        for sid, box in bboxes.items():
-            if not box:
-                continue
-            xmin, ymin, xmax, ymax = box
-            if xmin - BUFFER_BBOX <= oc[0] <= xmax + BUFFER_BBOX and ymin - BUFFER_BBOX <= oc[1] <= ymax + BUFFER_BBOX:
-                touching.add(sid)
-        if not touching:
-            dists = []
-            for sid, c in centroids.items():
-                if not c:
-                    continue
-                dist = math.sqrt((oc[0]-c[0])**2 + (oc[1]-c[1])**2 + (oc[2]-c[2])**2)
-                dists.append((dist, sid))
-            dists.sort()
-            for dist, sid in dists[:2]:
-                if dist <= NEAREST_MAX:
-                    touching.add(sid)
-        if touching:
-            door_to_spaces[did] = touching
-            door_to_opening[did] = opening
-    # adjacency
-    space_linked = {}
-    for sid_set in door_to_spaces.values():
-        lst = list(sid_set)
-        for s in lst:
-            others = set(lst) - {s}
-            if others:
-                space_linked.setdefault(s, set()).update(others)
-    for s in spaces:
-        sid = getattr(s, 'GlobalId', None) or str(id(s))
-        space_linked.setdefault(sid, set())
-    return space_linked, door_to_spaces, door_to_opening
+        
+        # Find all spaces that contain this opening
+        connected_spaces = []
+        margin = 500  # 500mm margin
+        
+        for sp in spaces_list:
+            sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
+            verts = get_vertices(sp)
+            if verts is not None and len(verts) > 0:
+                verts = verts * 1000.0  # Convert to mm
+                minv = verts.min(axis=0)
+                maxv = verts.max(axis=0)
+                
+                # Check if opening is in space (with margin)
+                if minv[0] - margin <= oc[0] <= maxv[0] + margin and \
+                   minv[1] - margin <= oc[1] <= maxv[1] + margin:
+                    connected_spaces.append(sp_gid)
+        
+        # Check if this door connects a hallway to a stair
+        hallways_in_door = [s for s in connected_spaces if s in hallway_spaces]
+        stairs_in_door = [s for s in connected_spaces if s in stair_spaces]
+        
+        if hallways_in_door and stairs_in_door:
+            for h_sid in hallways_in_door:
+                space_linked_to_stairs[h_sid] = True
+    
+    # Ensure all spaces have an entry
+    for sp in spaces_list:
+        sid = getattr(sp, 'GlobalId', None) or str(id(sp))
+        space_linked_to_stairs.setdefault(sid, False)
+    
+    return space_linked_to_stairs, {}, {}
 
 
 def analyze_door(door, door_map, opening_map):
@@ -237,8 +319,6 @@ def is_corridor(space, analysis):
     name = analysis.get('name') or ''
     if any(k in (name or '').lower() for k in ['hallway', 'corridor', 'passage', 'circulation']):
         return True
-    if analysis.get('is_elongated') and analysis.get('links_multiple_rooms'):
-        return True
     return False
 
 
@@ -248,18 +328,8 @@ def main():
     analyses = {}
     for sp in spaces:
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
-        length = width = 0
-        if getattr(sp, 'Representation', None):
-            for rep in sp.Representation.Representations:
-                for it in getattr(rep, 'Items', []) or []:
-                    if it.is_a('IfcExtrudedAreaSolid'):
-                        prof = getattr(it, 'SweptArea', None)
-                        if prof and prof.is_a('IfcRectangleProfileDef'):
-                            xd = float(getattr(prof, 'XDim', 0) or 0)
-                            yd = float(getattr(prof, 'YDim', 0) or 0)
-                            xd = xd if xd > 100 else xd * 1000.0
-                            yd = yd if yd > 100 else yd * 1000.0
-                            length = max(xd, yd); width = min(xd, yd)
+        length, width = extract_dimensions_from_geometry(sp)
+        
         if width == 0:
             A = get_numeric(sp, ['area'])
             P = get_numeric(sp, ['perimeter'])
@@ -279,10 +349,10 @@ def main():
         analyses[sid] = {'space': sp, 'name': getattr(sp, 'Name', None), 'type': getattr(sp, 'LongName', None), 'width': width, 'length': length}
 
     space_linked, door_map, open_map = build_space_linkages(model, spaces)
+    
     for sid, a in analyses.items():
-        linked = space_linked.get(sid, set())
-        a['linked_rooms_count'] = len(linked)
-        a['links_multiple_rooms'] = len(linked) >= 2
+        linked_to_stairs = space_linked.get(sid, False)
+        a['links_to_stairs'] = linked_to_stairs
         a['is_elongated'] = (a['length'] >= 3 * a['width']) if a['width'] > 0 else False
 
     corridors = [(sid, a) for sid, a in analyses.items() if is_corridor(a['space'], a)]
@@ -299,15 +369,10 @@ def main():
             checks += 1
         else:
             issues.append(f"Width is {a['width']:.0f}mm")
-        if a['is_elongated']:
+        if a['links_to_stairs']:
             checks += 1
         else:
-            ratio = (a['length'] / a['width']) if a['width'] > 0 else 0
-            issues.append(f"Length ({a['length']:.0f}mm) is {ratio:.1f}x width")
-        if a['links_multiple_rooms']:
-            checks += 1
-        else:
-            issues.append(f"Links to {a.get('linked_rooms_count', 0)} other room(s) via doors/openings")
+            issues.append(f"Does not link to stairs via doors/openings")
         if checks < 2:
             failing_corridors.append({'name': f"{a.get('name')} [{sid}]", 'issues': issues})
 
@@ -327,17 +392,15 @@ def main():
         w = a.get('width', 0) or 0
         if w >= 1300:
             checks_passed.append('width')
-        if a.get('is_elongated'):
-            checks_passed.append('elongation')
-        if a.get('links_multiple_rooms'):
-            checks_passed.append('links')
+        if a.get('links_to_stairs'):
+            checks_passed.append('stairs')
         ratio = (a['length'] / a['width']) if a['width'] > 0 else 0
         passing_corridors.append({
             'name': f"{a.get('name')} [{sid}]",
-            'width_mm': w,
-            'length_mm': a.get('length', 0) or 0,
-            'links': a.get('linked_rooms_count', 0),
-            'ratio': ratio,
+            'width_mm': float(w),
+            'length_mm': float(a.get('length', 0) or 0),
+            'links_stairs': a.get('links_to_stairs', False),
+            'ratio': float(ratio),
             'passed': checks_passed,
         })
 
@@ -361,12 +424,6 @@ def main():
 
     # Print passing (right) corridors
     print(f"\nAmount of corridors that fulfill the requirements (passing): {len(passing_corridors)}")
-    if passing_corridors:
-        print("The passing corridors (name [GlobalId]):")
-        for p in passing_corridors:
-            print(f" - {p}")
-    else:
-        print("No passing corridors found.")
 
     print(f"\nAmount of stairs: {len(stairs)}")
     print(f"Amount of stairs that don't fulfill the requirements: {len(failing_stairs)}")
