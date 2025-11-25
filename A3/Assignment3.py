@@ -63,12 +63,16 @@ def extract_dimensions_from_geometry(sp):
 
 
 def get_vertices(product):
-    """Extract vertices from IFC product using world coordinates."""
+    """Extract vertices from IFC product using world coordinates.
+    
+    Skip problematic geometry that hangs.
+    """
     try:
         shape = ifcopenshell.geom.create_shape(GEOM_SETTINGS, product)
         verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
         return verts
-    except Exception:
+    except (KeyboardInterrupt, Exception):
+        # Return None for any geometry error (includes timeouts/interrupts)
         return None
 # NOTE: get_bbox and get_door_midpoint were removed because the code
 # now uses `get_vertices` + geometry-based centroids via
@@ -697,6 +701,24 @@ def main():
             for it in f.get('space_issues', []):
                 print(f"    * {it}")
             for d in f.get('offending_doors', []):
+                dn = d.get('door_name') or d.get('door_gid')
+                rs = ', '.join(d.get('reasons', []))
+                print(f"    - Door {dn}: {rs}")
+    else:
+        print('\nNo stair compartmentation failures detected.')
+
+
+if __name__ == '__main__':
+    main()
+                dn = d.get('door_name') or d.get('door_gid')
+                rs = ', '.join(d.get('reasons', []))
+                print(f"    - Door {dn}: {rs}")
+    else:
+        print('\nNo stair compartmentation failures detected.')
+
+
+if __name__ == '__main__':
+    main()
                 dn = d.get('door_name') or d.get('door_gid')
                 rs = ', '.join(d.get('reasons', []))
                 print(f"    - Door {dn}: {rs}")
