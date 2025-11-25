@@ -663,7 +663,7 @@ def main():
     print(f"Amount of doors that don't fulfill the requirements: {len(failing_doors)}")
     if failing_doors:
         print("The names of the doors and what is not right with them:")
-        for d in failing_doors:
+        for d in fanailing_doors:
             print(f" - {d['name']}: {', '.join(d['issues'])}")
     else:
         print("No failing doors.")
