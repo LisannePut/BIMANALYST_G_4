@@ -4,6 +4,8 @@ import os
 import math
 import numpy as np
 import re
+import sys
+import time
 
 # BR18 requirements (concise)
 # - Doors: clear opening width >= 800 mm (DOOR_MIN)
@@ -27,6 +29,9 @@ NEAREST_MAX = 30000.0
 # Geometry settings for door midpoint calculation
 GEOM_SETTINGS = ifcopenshell.geom.settings()
 GEOM_SETTINGS.set(GEOM_SETTINGS.USE_WORLD_COORDS, True)
+
+# Runtime flags (can be toggled via CLI)
+DISABLE_GEOM = False  # When True, skip heavy ifcopenshell.geom shape creation
 
 
 def to_mm(v):
@@ -67,6 +72,9 @@ def get_vertices(product):
     
     Skip problematic geometry that hangs.
     """
+    # Allow disabling heavy geometry extraction in quick mode
+    if DISABLE_GEOM:
+        return None
     try:
         shape = ifcopenshell.geom.create_shape(GEOM_SETTINGS, product)
         verts = np.array(shape.geometry.verts, dtype=float).reshape(-1, 3)
@@ -578,11 +586,31 @@ def is_corridor(space, analysis):
 
 def main():
     # (thresholds are hard-coded in constants at the top of this file)
+    global DISABLE_GEOM
+    t0 = time.time()
+    # Parse simple CLI flags
+    args = set(sys.argv[1:])
+    quick = ('--quick' in args) or ('--no-geom' in args)
+    if quick:
+        DISABLE_GEOM = True
 
+    print(f"Opening IFC at: {IFC_PATH}", flush=True)
     model = ifcopenshell.open(IFC_PATH)
+    print(f"IFC opened in {time.time()-t0:.2f}s", flush=True)
+
     spaces = model.by_type('IfcSpace')
+    doors_all = model.by_type('IfcDoor')
+    flights_all = model.by_type('IfcStairFlight')
+    print(f"Counts -> Spaces: {len(spaces)}, Doors: {len(doors_all)}, StairFlights: {len(flights_all)}", flush=True)
+
+    # In quick mode, avoid expensive geometry work by limiting elements
+    if quick:
+        # Keep all for final printing, but only analyze a subset where geometry is needed
+        spaces_to_analyze = list(spaces)  # We still analyze all but with geometry disabled
+    else:
+        spaces_to_analyze = list(spaces)
     analyses = {}
-    for sp in spaces:
+    for idx, sp in enumerate(spaces_to_analyze, 1):
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
         length, width = extract_dimensions_from_geometry(sp)
         
@@ -603,6 +631,8 @@ def main():
                 except Exception:
                     pass
         analyses[sid] = {'space': sp, 'name': getattr(sp, 'Name', None), 'type': getattr(sp, 'LongName', None), 'width': width, 'length': length}
+        if idx % 20 == 0:
+            print(f"Analyzed {idx}/{len(spaces_to_analyze)} spaces...", flush=True)
 
     space_linked, door_map, door_container_map = build_space_linkages(model, spaces)
     
@@ -612,14 +642,16 @@ def main():
         a['is_elongated'] = (a['length'] >= 3 * a['width']) if a['width'] > 0 else False
 
     corridors = [(sid, a) for sid, a in analyses.items() if is_corridor(a['space'], a)]
-    doors = [analyze_door(d, door_map, door_container_map) for d in model.by_type('IfcDoor')]
+    doors = [analyze_door(d, door_map, door_container_map) for d in doors_all]
     failing_doors = [d for d in doors if d['issues']]
-    flights = model.by_type('IfcStairFlight')
+    flights = flights_all
     stairs = [analyze_stair(f) for f in flights]
     failing_stairs = [s for s in stairs if s['issues']]
 
     # Run compartmentation checks for stairs (doors in walls, doors swing away)
     stair_comp_failures = analyze_stair_compartmentation(model, analyses, door_map, door_container_map, spaces)
+
+    print(f"\nCompleted in {time.time()-t0:.2f}s", flush=True)
 
     failing_corridors = []
     for sid, a in corridors:
@@ -710,21 +742,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-                dn = d.get('door_name') or d.get('door_gid')
-                rs = ', '.join(d.get('reasons', []))
-                print(f"    - Door {dn}: {rs}")
-    else:
-        print('\nNo stair compartmentation failures detected.')
 
-
-if __name__ == '__main__':
-    main()
-                dn = d.get('door_name') or d.get('door_gid')
-                rs = ', '.join(d.get('reasons', []))
-                print(f"    - Door {dn}: {rs}")
-    else:
-        print('\nNo stair compartmentation failures detected.')
-
-
-if __name__ == '__main__':
-    main()
