@@ -3,13 +3,26 @@ import ifcopenshell.geom
 import os
 import math
 import numpy as np
+import re
+
+# BR18 requirements (concise)
+# - Doors: clear opening width >= 800 mm (DOOR_MIN)
+# - Stairs: clear width >= 1000 mm (STAIR_MIN)
+# - Corridors: clear width >= 1300 mm (CORRIDOR_MIN) AND must link to a stair
+# The BR18 PDF is included in this folder as 'BR18.pdf' and referenced by
+# BR18_DOC_PATH below.
 
 # Config
 IFC_PATH = os.path.join(os.path.dirname(__file__), "model", "25-16-D-ARCH.ifc")
 DOOR_MIN = 800
 STAIR_MIN = 1000
+CORRIDOR_MIN = 1300
 BUFFER_BBOX = 1000.0
 NEAREST_MAX = 30000.0
+# BR18 PDF parsing has been removed. Use the hard-coded BR18 thresholds below.
+
+
+# PDF parsing removed: thresholds are hard-coded at the top of this file
 
 # Geometry settings for door midpoint calculation
 GEOM_SETTINGS = ifcopenshell.geom.settings()
@@ -57,27 +70,10 @@ def get_vertices(product):
         return verts
     except Exception:
         return None
-
-
-def get_bbox(product):
-    """Get axis-aligned bounding box (min, max) for a product."""
-    verts = get_vertices(product)
-    if verts is None or len(verts) == 0:
-        return None, None
-    minv = verts.min(axis=0)
-    maxv = verts.max(axis=0)
-    return minv, maxv
-
-
-def get_door_midpoint(door):
-    """Compute midpoint of door's bounding box."""
-    minv, maxv = get_bbox(door)
-    if minv is None or maxv is None:
-        return None
-    mid = (minv + maxv) / 2.0
-    return mid
-
-
+# NOTE: get_bbox and get_door_midpoint were removed because the code
+# now uses `get_vertices` + geometry-based centroids via
+# `get_element_centroid`. They were unused and are deleted to keep
+# the file clean.
 
 def get_numeric(entity, names):
     names_l = [n.lower() for n in names]
@@ -196,11 +192,16 @@ def build_space_bboxes(spaces):
 
 
 def build_space_linkages(model, spaces):
-    """Check if hallways connect directly to stair spaces via doors."""
+    """Check if hallways connect to stair spaces via doors.
+
+    This builds adjacency between spaces that share a door opening, then
+    computes which hallways are linked to stairs either directly (door)
+    or transitively via other hallways (hallway -> hallway -> ... -> stair).
+    """
     # Identify stair and hallway spaces
     stair_spaces = {}
     hallway_spaces = {}
-    
+
     spaces_list = list(spaces)
     for sp in spaces_list:
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
@@ -209,28 +210,41 @@ def build_space_linkages(model, spaces):
             stair_spaces[sid] = sp
         elif 'hallway' in name:
             hallway_spaces[sid] = sp
-    
-    # Track which hallways connect to stairs
-    space_linked_to_stairs = {sid: False for sid in hallway_spaces}
-    
-    # For each door, find which spaces it connects
+
+    # Build adjacency map between spaces (space_gid -> set(space_gid)) using doors
+    adjacency = { (getattr(sp, 'GlobalId', None) or str(id(sp))): set() for sp in spaces_list }
+
+    # Build helper map: opening_gid -> list of containing elements (walls etc.)
+    opening_to_containers = {}
+    for relv in model.by_type('IfcRelVoidsElement'):
+        container = getattr(relv, 'RelatingBuildingElement', None)
+        opening = getattr(relv, 'RelatedOpeningElement', None)
+        if not opening:
+            continue
+        ogid = getattr(opening, 'GlobalId', None) or str(id(opening))
+        if container is not None:
+            opening_to_containers.setdefault(ogid, []).append(container)
+
+    # We'll also record which door connects to which spaces and which containers its opening sits in
+    door_map = {}
+    door_container_map = {}
+
     for rel in model.by_type('IfcRelFillsElement'):
         opening = getattr(rel, 'RelatingOpeningElement', None)
         door = getattr(rel, 'RelatedBuildingElement', None)
         if not (opening and door and door.is_a('IfcDoor')):
             continue
-        
+
         # Get opening centroid (try opening first, then door as fallback)
         oc = get_element_centroid(opening)
         if oc is None:
             oc = get_element_centroid(door)
         if oc is None:
             continue
-        
+
         # Find all spaces that contain this opening
         connected_spaces = []
         margin = 500  # 500mm margin
-        
         for sp in spaces_list:
             sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
             verts = get_vertices(sp)
@@ -238,26 +252,59 @@ def build_space_linkages(model, spaces):
                 verts = verts * 1000.0  # Convert to mm
                 minv = verts.min(axis=0)
                 maxv = verts.max(axis=0)
-                
-                # Check if opening is in space (with margin)
                 if minv[0] - margin <= oc[0] <= maxv[0] + margin and \
                    minv[1] - margin <= oc[1] <= maxv[1] + margin:
                     connected_spaces.append(sp_gid)
-        
-        # Check if this door connects a hallway to a stair
-        hallways_in_door = [s for s in connected_spaces if s in hallway_spaces]
-        stairs_in_door = [s for s in connected_spaces if s in stair_spaces]
-        
-        if hallways_in_door and stairs_in_door:
-            for h_sid in hallways_in_door:
-                space_linked_to_stairs[h_sid] = True
-    
-    # Ensure all spaces have an entry
+
+        # Link all connected spaces pairwise in adjacency
+        for i in range(len(connected_spaces)):
+            for j in range(i + 1, len(connected_spaces)):
+                a = connected_spaces[i]
+                b = connected_spaces[j]
+                adjacency.setdefault(a, set()).add(b)
+                adjacency.setdefault(b, set()).add(a)
+
+        # Record door -> spaces map
+        dg = getattr(door, 'GlobalId', None) or str(id(door))
+        door_map.setdefault(dg, set()).update(connected_spaces)
+
+        # Record container types (walls etc.) for this opening so we can check compartmentation
+        og = getattr(opening, 'GlobalId', None) or str(id(opening))
+        containers = opening_to_containers.get(og, [])
+        door_container_map[dg] = [c.is_a() for c in containers]
+
+    # Now compute which hallways are linked to stairs.
+    # Start from stairs and propagate through hallway nodes only.
+    linked_hallways = set()
+    from collections import deque
+    q = deque()
+
+    # Enqueue all hallways that are directly adjacent to a stair
+    for stair_gid in stair_spaces:
+        for nb in adjacency.get(stair_gid, set()):
+            if nb in hallway_spaces and nb not in linked_hallways:
+                linked_hallways.add(nb)
+                q.append(nb)
+
+    # BFS across hallway nodes only
+    while q:
+        current = q.popleft()
+        for nb in adjacency.get(current, set()):
+            if nb in hallway_spaces and nb not in linked_hallways:
+                linked_hallways.add(nb)
+                q.append(nb)
+
+    # Prepare final map for all hallways
+    space_linked_to_stairs = {}
+    for sid in hallway_spaces:
+        space_linked_to_stairs[sid] = (sid in linked_hallways)
+
+    # Ensure all spaces have an entry (False for non-hallways)
     for sp in spaces_list:
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
         space_linked_to_stairs.setdefault(sid, False)
-    
-    return space_linked_to_stairs, {}, {}
+
+    return space_linked_to_stairs, door_map, door_container_map
 
 
 def analyze_door(door, door_map, opening_map):
@@ -315,6 +362,188 @@ def analyze_stair(flight):
     return {'name': full, 'width_mm': width, 'issues': issues}
 
 
+def _door_swing_heuristic(door):
+    """Try a simple heuristic to determine if a door swings away from an adjacent space.
+
+    Returns 'away', 'toward', or 'unknown'. This is a best-effort string-match heuristic
+    from door attributes (Name, ObjectType, Description, OperationType). If nothing
+    meaningful is found we return 'unknown'.
+    """
+    # Prefer explicit IFC attribute OperationType when available
+    try:
+        op = getattr(door, 'OperationType', None)
+        if op:
+            op_s = str(op).lower()
+            # Common textual/enum hints indicating outward/inward swing
+            if 'out' in op_s or 'outward' in op_s or 'opens_out' in op_s or 'open_out' in op_s:
+                return 'away'
+            if 'in' in op_s or 'inward' in op_s or 'opens_in' in op_s or 'open_in' in op_s:
+                return 'toward'
+            # Some enumerations include SWING + direction, try to detect 'swing' with qualifier
+            if 'swing' in op_s:
+                if 'out' in op_s or 'outward' in op_s:
+                    return 'away'
+                if 'in' in op_s or 'inward' in op_s:
+                    return 'toward'
+    except Exception:
+        pass
+
+    # Fallback: inspect other textual attributes (Name, ObjectType, Description, Tag)
+    candidates = []
+    for attr in ('PredefinedType', 'ObjectType', 'Name', 'Description', 'Tag'):
+        try:
+            v = getattr(door, attr, None)
+            if v:
+                candidates.append(str(v).lower())
+        except Exception:
+            continue
+
+    txt = ' '.join(candidates)
+    if not txt:
+        return 'unknown'
+
+    if 'outward' in txt or 'opens out' in txt or 'opens away' in txt or 'open out' in txt or 'open outwards' in txt:
+        return 'away'
+    if 'inward' in txt or 'opens in' in txt or 'open in' in txt or 'opens into' in txt or 'into' in txt:
+        return 'toward'
+    if 'swing' in txt:
+        if 'out' in txt or 'outward' in txt:
+            return 'away'
+        if 'in' in txt or 'inward' in txt:
+            return 'toward'
+
+    return 'unknown'
+
+
+def analyze_stair_compartmentation(model, analyses, door_map, door_container_map, spaces_list):
+    """Check compartmentation for actual IfcStairFlight elements only.
+
+    Heuristics implemented:
+    - The stair flight must span (intersect) at least two building storey elevations.
+    - The stair flight should have at least one door connecting its containing space(s).
+    - Doors leading to the stair should be installed in walls (checked via IfcRelVoidsElement container)
+      and ideally swing away from the stair (heuristic based on textual door attributes).
+
+    Returns a list of failing stair records with reasons and offending doors.
+    """
+    failing = []
+
+    # Quick lookup of doors by GlobalId
+    doors_by_gid = { (getattr(d, 'GlobalId', None) or str(id(d))): d for d in model.by_type('IfcDoor') }
+
+    # Collect building storey elevations (mm)
+    storeys = []
+    for bs in model.by_type('IfcBuildingStorey'):
+        elev = getattr(bs, 'Elevation', None)
+        if elev is None:
+            continue
+        try:
+            ev = float(elev)
+            ev_mm = ev if ev > 100 else ev * 1000.0
+            storeys.append(ev_mm)
+        except Exception:
+            continue
+    storeys = sorted(storeys)
+
+    # Helper: find spaces that contain a product (via IfcRelContainedInSpatialStructure or spatial centroid fallback)
+    rels = model.by_type('IfcRelContainedInSpatialStructure')
+    def _find_containing_spaces(product):
+        gids = set()
+        for r in rels:
+            for el in getattr(r, 'RelatedElements', []) or []:
+                if el == product:
+                    cont = getattr(r, 'RelatingStructure', None)
+                    if cont is not None and cont.is_a('IfcSpace'):
+                        gids.add(getattr(cont, 'GlobalId', None) or str(id(cont)))
+        # fallback: centroid-in-space test
+        if not gids:
+            pc = get_element_centroid(product)
+            if pc is not None:
+                margin = 500
+                for sp in spaces_list:
+                    sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
+                    verts = get_vertices(sp)
+                    if verts is not None and len(verts) > 0:
+                        verts = verts * 1000.0
+                        minv = verts.min(axis=0); maxv = verts.max(axis=0)
+                        if minv[0] - margin <= pc[0] <= maxv[0] + margin and minv[1] - margin <= pc[1] <= maxv[1] + margin:
+                            gids.add(sp_gid)
+        return gids
+
+    # Iterate through true stair flights
+    for flight in model.by_type('IfcStairFlight'):
+        fid = getattr(flight, 'GlobalId', None) or str(id(flight))
+        fname = getattr(flight, 'Name', None) or str(flight)
+        verts = get_vertices(flight)
+        if verts is None or len(verts) == 0:
+            # fallback: treat as unknown geometry -> mark for manual check
+            failing.append({'stair_name': f"{fname} [{fid}]", 'space_issues': ['no geometry found for stair flight'], 'offending_doors': []})
+            continue
+        verts = verts * 1000.0
+        minz = float(verts[:, 2].min())
+        maxz = float(verts[:, 2].max())
+
+        # Check storey intersection: count distinct storeys whose elevation lies within flight z-range
+        tol = 500.0
+        intersecting = [ev for ev in storeys if (ev >= minz - tol and ev <= maxz + tol)]
+        issues = []
+        if len(intersecting) < 2:
+            issues.append('stair flight does not span multiple building storey elevations')
+
+        # Find containing spaces for this flight
+        containing_space_gids = _find_containing_spaces(flight)
+
+        # Gather adjacent doors by checking door_map entries that reference any containing space
+        adjacent_doors = []
+        for dg, sids in door_map.items():
+            if any(sg in sids for sg in containing_space_gids):
+                adjacent_doors.append(dg)
+
+        if not adjacent_doors:
+            # If no doors found via containing spaces, try spatial proximity between door centroids and flight
+            # Build flight XY bbox
+            minxy = verts[:, :2].min(axis=0); maxxy = verts[:, :2].max(axis=0)
+            margin_xy = 1500.0
+            for dg in door_map.keys():
+                # attempt to find door element and centroid
+                door = doors_by_gid.get(dg)
+                if door is None:
+                    continue
+                c = get_element_centroid(door)
+                if c is None:
+                    continue
+                cx, cy, cz = c
+                if (cx >= minxy[0] - margin_xy and cx <= maxxy[0] + margin_xy and
+                    cy >= minxy[1] - margin_xy and cy <= maxxy[1] + margin_xy and
+                    cz >= minz - tol and cz <= maxz + tol):
+                    adjacent_doors.append(dg)
+
+        offending_doors = []
+        # Check each adjacent door for container (wall) and swing direction
+        for dg in adjacent_doors:
+            door = doors_by_gid.get(dg)
+            reason_parts = []
+            conts = door_container_map.get(dg, [])
+            in_wall = any('IfcWall' in c for c in conts) or any(c == 'IfcWall' or c == 'IfcWallStandardCase' for c in conts)
+            if not in_wall:
+                reason_parts.append('door not installed in wall')
+
+            swing = _door_swing_heuristic(door) if door is not None else 'unknown'
+            if swing == 'toward':
+                reason_parts.append('door swings toward stair')
+            elif swing == 'unknown':
+                # mark unknown as a warning; include as failing so user can inspect
+                reason_parts.append('door swing unknown')
+
+            if reason_parts:
+                offending_doors.append({'door_gid': dg, 'reasons': reason_parts, 'door_name': getattr(door, 'Name', None)})
+
+        if issues or offending_doors:
+            failing.append({'stair_name': f"{fname} [{fid}]", 'space_issues': issues, 'offending_doors': offending_doors})
+
+    return failing
+
+
 def is_corridor(space, analysis):
     name = analysis.get('name') or ''
     if any(k in (name or '').lower() for k in ['hallway', 'corridor', 'passage', 'circulation']):
@@ -323,6 +552,8 @@ def is_corridor(space, analysis):
 
 
 def main():
+    # (thresholds are hard-coded in constants at the top of this file)
+
     model = ifcopenshell.open(IFC_PATH)
     spaces = model.by_type('IfcSpace')
     analyses = {}
@@ -362,10 +593,13 @@ def main():
     stairs = [analyze_stair(f) for f in flights]
     failing_stairs = [s for s in stairs if s['issues']]
 
+    # Run compartmentation checks for stairs (doors in walls, doors swing away)
+    stair_comp_failures = analyze_stair_compartmentation(model, analyses, door_map, open_map, spaces)
+
     failing_corridors = []
     for sid, a in corridors:
         checks = 0; issues = []
-        if a['width'] >= 1300:
+        if a['width'] >= CORRIDOR_MIN:
             checks += 1
         else:
             issues.append(f"Width is {a['width']:.0f}mm")
@@ -390,7 +624,7 @@ def main():
             continue
         checks_passed = []
         w = a.get('width', 0) or 0
-        if w >= 1300:
+        if w >= CORRIDOR_MIN:
             checks_passed.append('width')
         if a.get('links_to_stairs'):
             checks_passed.append('stairs')
@@ -433,6 +667,20 @@ def main():
             print(f" - {s['name']}: {', '.join(s['issues'])}")
     else:
         print("No failing stairs.")
+
+    # Report compartmentation failures (doors/walls/swing)
+    if stair_comp_failures:
+        print('\nStair compartmentation failures:')
+        for f in stair_comp_failures:
+            print(f" - {f['stair_name']}")
+            for it in f.get('space_issues', []):
+                print(f"    * {it}")
+            for d in f.get('offending_doors', []):
+                dn = d.get('door_name') or d.get('door_gid')
+                rs = ', '.join(d.get('reasons', []))
+                print(f"    - Door {dn}: {rs}")
+    else:
+        print('\nNo stair compartmentation failures detected.')
 
 
 if __name__ == '__main__':
