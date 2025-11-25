@@ -600,7 +600,7 @@ def main():
                     pass
         analyses[sid] = {'space': sp, 'name': getattr(sp, 'Name', None), 'type': getattr(sp, 'LongName', None), 'width': width, 'length': length}
 
-    space_linked, door_map, open_map = build_space_linkages(model, spaces)
+    space_linked, door_map, door_container_map = build_space_linkages(model, spaces)
     
     for sid, a in analyses.items():
         linked_to_stairs = space_linked.get(sid, False)
@@ -608,14 +608,14 @@ def main():
         a['is_elongated'] = (a['length'] >= 3 * a['width']) if a['width'] > 0 else False
 
     corridors = [(sid, a) for sid, a in analyses.items() if is_corridor(a['space'], a)]
-    doors = [analyze_door(d, door_map, open_map) for d in model.by_type('IfcDoor')]
+    doors = [analyze_door(d, door_map, door_container_map) for d in model.by_type('IfcDoor')]
     failing_doors = [d for d in doors if d['issues']]
     flights = model.by_type('IfcStairFlight')
     stairs = [analyze_stair(f) for f in flights]
     failing_stairs = [s for s in stairs if s['issues']]
 
     # Run compartmentation checks for stairs (doors in walls, doors swing away)
-    stair_comp_failures = analyze_stair_compartmentation(model, analyses, door_map, open_map, spaces)
+    stair_comp_failures = analyze_stair_compartmentation(model, analyses, door_map, door_container_map, spaces)
 
     failing_corridors = []
     for sid, a in corridors:
