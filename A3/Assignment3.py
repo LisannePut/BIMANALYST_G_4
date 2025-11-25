@@ -499,13 +499,34 @@ def analyze_stair_compartmentation(model, analyses, door_map, door_container_map
             if any(sg in sids for sg in containing_space_gids):
                 adjacent_doors.append(dg)
 
-        if not adjacent_doors:
-            # If no doors found via containing spaces, try spatial proximity between door centroids and flight
-            # Build flight XY bbox
+        # Filter candidates by centroid proximity (tighten margins to reduce false positives)
+        def _filter_by_centroid(candidates):
+            out = []
+            if not candidates:
+                return out
             minxy = verts[:, :2].min(axis=0); maxxy = verts[:, :2].max(axis=0)
-            margin_xy = 1500.0
+            margin_xy = 500.0
+            for dg in candidates:
+                door = doors_by_gid.get(dg)
+                if door is None:
+                    continue
+                c = get_element_centroid(door)
+                if c is None:
+                    continue
+                cx, cy, cz = c
+                if (cx >= minxy[0] - margin_xy and cx <= maxxy[0] + margin_xy and
+                    cy >= minxy[1] - margin_xy and cy <= maxxy[1] + margin_xy and
+                    cz >= minz - tol and cz <= maxz + tol):
+                    out.append(dg)
+            return out
+
+        adjacent_doors = _filter_by_centroid(adjacent_doors)
+
+        if not adjacent_doors:
+            # If no doors found via containing spaces, try spatial proximity between all doors and flight
+            minxy = verts[:, :2].min(axis=0); maxxy = verts[:, :2].max(axis=0)
+            margin_xy = 500.0
             for dg in door_map.keys():
-                # attempt to find door element and centroid
                 door = doors_by_gid.get(dg)
                 if door is None:
                     continue
