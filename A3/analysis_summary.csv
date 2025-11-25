@@ -1,0 +1,60 @@
+category,item_id,item_name,status,reason_or_details
+
+DOORS
+summary,,,failing,0
+summary,,,passing,190
+
+CORRIDORS
+summary,,,failing,3
+summary,,,passing,15
+corridor,,Hallway:1220218 [3DwjwSW7T408GrcIbypn91],fail,Does not link to stairs via doors/openings
+corridor,,Hallway:1573335 [2UtUBnYTLAR8Xlpya3fM2M],fail,Does not link to stairs via doors/openings
+corridor,,Hallway:1582548 [0j186vK5vARu0WLIOAHrnP],fail,Does not link to stairs via doors/openings
+corridor,,Hallway:1133161 [3Vo8snhKX7fQarsO4DMUkE],pass,"width, stairs"
+corridor,,Hallway:1133176 [3Vo8snhKX7fQarsO4DMUkV],pass,"width, stairs"
+corridor,,Hallway:1133209 [3Vo8snhKX7fQarsO4DMUj_],pass,"width, stairs"
+corridor,,Hallway:1133213 [3Vo8snhKX7fQarsO4DMUjw],pass,"width, stairs"
+corridor,,Hallway:1157887 [00BLWdUaL9VBG$qrz5yV$D],pass,"width, stairs"
+corridor,,Hallway:1158176 [00BLWdUaL9VBG$qrz5yVaI],pass,"width, stairs"
+corridor,,Hallway:1158179 [00BLWdUaL9VBG$qrz5yVaH],pass,"width, stairs"
+corridor,,Hallway:1317689 [3gjL9ckIn6hRtwbrrTdNOv],pass,"width, stairs"
+corridor,,Hallway:1319242 [0xxxPgf0j7WfKtQEC_PQnj],pass,"width, stairs"
+corridor,,Hallway:1320061 [0xxxPgf0j7WfKtQEC_PQbQ],pass,"width, stairs"
+corridor,,Hallway:1320448 [1NBVcOVHb1Vh3Dwik2JWoc],pass,"width, stairs"
+corridor,,Hallway:1574774 [2UtUBnYTLAR8Xlpya3fMOt],pass,"width, stairs"
+corridor,,Hallway:1575031 [2UtUBnYTLAR8Xlpya3fMas],pass,"width, stairs"
+corridor,,Hallway:1576306 [2UtUBnYTLAR8Xlpya3fMmp],pass,"width, stairs"
+corridor,,Hallway:2234384 [1$EM9uRuLF$xLj0Op5ne1b],pass,"width, stairs"
+
+STAIRS (width)
+summary,,,failing,0
+summary,,,passing,25
+
+STAIR FLIGHTS (4-wall enclosure)
+summary,,,failing,15
+summary,,,passing,10
+stair_flight,1c31cJXb90IxXHRa9vY4bT,Assembled Stair:Stair:1282665 Run 3,fail,sides_covered=3/4
+stair_flight,3m3JCvzQnFKuJqELvHPwC0,Assembled Stair:Stair:1286620 Run 3,fail,sides_covered=3/4
+stair_flight,3m3JCvzQnFKuJqELvHPw2i,Assembled Stair:Stair:1286728 Run 3,fail,sides_covered=3/4
+stair_flight,3m3JCvzQnFKuJqELvHPw4m,Assembled Stair:Stair:1287116 Run 3,fail,sides_covered=3/4
+stair_flight,3m3JCvzQnFKuJqELvHPwRk,Assembled Stair:Stair:1287174 Run 3,fail,sides_covered=3/4
+stair_flight,3rdKBYQATFzB8TjVixyd2$,Assembled Stair:Stair:1324988 Run 1,fail,sides_covered=0/4
+stair_flight,2zlPi4ZMsHCI2G5uXo32yt,Assembled Stair:Stair:1324988 Run 1:2,fail,sides_covered=0/4
+stair_flight,1ouWrxTdJY3tgBmfSU9INi,Assembled Stair:Stair:1324988 Run 1:3,fail,sides_covered=0/4
+stair_flight,2xb_IptbfxZClKYwyQmhAX,Assembled Stair:Stair:1324988 Run 1:4,fail,sides_covered=0/4
+stair_flight,1nYXVArkn45AQsTiHvh2e0,Assembled Stair:Stair:1325916 Run 1,fail,sides_covered=0/4
+stair_flight,0d5miNTyrfh9QU06CNwVyj,Assembled Stair:Stair:1325916 Run 1:2,fail,sides_covered=0/4
+stair_flight,18Id_xmGvIIt7$oDvgFR2y,Assembled Stair:Stair:1325916 Run 1:3,fail,sides_covered=0/4
+stair_flight,03rhNBS_T7rrZsBgpNs1vW,Assembled Stair:Stair:1325916 Run 1:4,fail,sides_covered=0/4
+stair_flight,0OGatyx4vC0QOFzOVNSVsi,Assembled Stair:Stair:2381149 Run 1,fail,sides_covered=0/4
+stair_flight,0Mfqax1YLEneDz_mPOqEuP,Assembled Stair:Stair:2381470 Run 1,fail,sides_covered=0/4
+stair_flight,1c31cJXb90IxXHRa9vY4b7,Assembled Stair:Stair:1282665 Run 1,pass,
+stair_flight,1c31cJXb90IxXHRa9vY4b1,Assembled Stair:Stair:1282665 Run 2,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPwC_,Assembled Stair:Stair:1286620 Run 1,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPwCy,Assembled Stair:Stair:1286620 Run 2,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPw2g,Assembled Stair:Stair:1286728 Run 1,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPw2e,Assembled Stair:Stair:1286728 Run 2,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPw4k,Assembled Stair:Stair:1287116 Run 1,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPw4i,Assembled Stair:Stair:1287116 Run 2,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPwRa,Assembled Stair:Stair:1287174 Run 1,pass,
+stair_flight,3m3JCvzQnFKuJqELvHPwRg,Assembled Stair:Stair:1287174 Run 2,pass,

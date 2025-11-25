@@ -1757,6 +1757,183 @@ def main():
     # Geometry-based stair space detection (may reveal additional stair spaces)
     geo_stair_spaces = identify_stair_spaces_geometry(model)
 
+    # Export summary to Excel (.xlsx) if available, otherwise fall back to CSV
+    import os
+    base_dir = os.path.dirname(__file__)
+    csv_path = os.path.join(base_dir, 'analysis_summary.csv')
+    xlsx_path = os.path.join(base_dir, 'analysis_summary.xlsx')
+
+    def _write_csv(path):
+        import csv
+        with open(path, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            # Header
+            writer.writerow(['category', 'item_id', 'item_name', 'status', 'reason_or_details'])
+
+            # Doors
+            writer.writerow([]); writer.writerow(['DOORS'])
+            writer.writerow(['summary', '', '', 'failing', len(failing_doors)])
+            writer.writerow(['summary', '', '', 'passing', len(doors) - len(failing_doors)])
+            for d in failing_doors:
+                writer.writerow([
+                    'door', '',
+                    d.get('name',''), 'fail', '; '.join(d.get('issues', []))
+                ])
+
+            # Corridors
+            writer.writerow([]); writer.writerow(['CORRIDORS'])
+            writer.writerow(['summary', '', '', 'failing', len(failing_corridors)])
+            writer.writerow(['summary', '', '', 'passing', len(passing_corridors)])
+            for c in failing_corridors:
+                writer.writerow(['corridor', '', c.get('name',''), 'fail', '; '.join(c.get('issues', []))])
+            for c in passing_corridors:
+                writer.writerow(['corridor', '', c.get('name',''), 'pass', ', '.join(c.get('passed', []))])
+
+            # Stairs (width compliance)
+            writer.writerow([]); writer.writerow(['STAIRS (width)'])
+            writer.writerow(['summary', '', '', 'failing', len(failing_stairs)])
+            writer.writerow(['summary', '', '', 'passing', len(stairs) - len(failing_stairs)])
+            for s in failing_stairs:
+                writer.writerow(['stair', '', s.get('name',''), 'fail', '; '.join(s.get('issues', []))])
+
+            # Stair Flights Enclosure (4 walls)
+            writer.writerow([]); writer.writerow(['STAIR FLIGHTS (4-wall enclosure)'])
+            failing_flights = [f for f in flight_4wall if not f.get('fully_enclosed')]
+            passing_flights = [f for f in flight_4wall if f.get('fully_enclosed')]
+            writer.writerow(['summary', '', '', 'failing', len(failing_flights)])
+            writer.writerow(['summary', '', '', 'passing', len(passing_flights)])
+            for f in failing_flights:
+                writer.writerow([
+                    'stair_flight', f.get('flight_gid',''), f.get('flight_name',''), 'fail', f"sides_covered={f.get('sides_covered',0)}/4"
+                ])
+            for f in passing_flights:
+                writer.writerow(['stair_flight', f.get('flight_gid',''), f.get('flight_name',''), 'pass', ''])
+
+    def _write_xlsx(path):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+        wb = Workbook()
+
+        # Single sheet matching requested format
+        ws = wb.active
+        ws.title = 'IFC_Compliance_Report'
+
+        # Requirements section at top
+        ws.append(['Requirements'])
+        ws['A1'].font = Font(bold=True, size=12)
+        ws.append(['- Doors: clear opening width ≥ 800 mm'])
+        ws.append(['- Corridors: clear width ≥ 1300 mm AND must link to a stair via a door/opening'])
+        ws.append(['- Stairs: clear flight width ≥ 1000 mm'])
+        ws.append(['- Stair flights: must be enclosed by 4 walls (left, right, top, bottom)'])
+        ws.append([''])
+
+        # Table header per your spec
+        ws.append(['Category', 'Passing count', 'Failing count', "Failing element ID's", 'Reason for failure'])
+        for c in ('A','B','C','D','E'):
+            ws[f"{c}7"].font = Font(bold=True)
+            ws[f"{c}7"].fill = PatternFill(start_color='FFEFEFEF', end_color='FFEFEFEF', fill_type='solid')
+            ws[f"{c}7"].alignment = Alignment(horizontal='center')
+
+        # Doors row
+        door_fail_ids = []  # we don't have IDs directly for failing doors in summary; leave empty or collect if available
+        door_reasons = []
+        for d in failing_doors:
+            door_fail_ids.append('')  # ID not stored; could be parsed from d['name'] if needed
+            door_reasons.append('; '.join(d.get('issues', [])))
+        ws.append([
+            'Doors',
+            (len(doors) - len(failing_doors)),
+            len(failing_doors),
+            ', '.join(door_fail_ids),
+            '; '.join(door_reasons) if door_reasons else ''
+        ])
+
+        # Corridors row
+        corridor_fail_ids = []
+        corridor_reasons = []
+        for c in failing_corridors:
+            # Extract element ID from name like "Hallway:XXXXX [GID]" if present; otherwise leave empty
+            nm = c.get('name','')
+            try:
+                if ':' in nm:
+                    corridor_fail_ids.append(nm.split(':',1)[1].split()[0])
+                else:
+                    corridor_fail_ids.append('')
+            except Exception:
+                corridor_fail_ids.append('')
+            corridor_reasons.append('; '.join(c.get('issues', [])))
+        ws.append([
+            'Corridors',
+            len(passing_corridors),
+            len(failing_corridors),
+            ', '.join(corridor_fail_ids),
+            '; '.join(corridor_reasons) if corridor_reasons else ''
+        ])
+
+        # Stairs (width) row
+        stair_fail_ids = []
+        stair_reasons = []
+        for s in failing_stairs:
+            # Stair ID not parsed; leave blank or parse from name if pattern exists
+            stair_fail_ids.append('')
+            stair_reasons.append('; '.join(s.get('issues', [])))
+        ws.append([
+            'Stairs (width)',
+            (len(stairs) - len(failing_stairs)),
+            len(failing_stairs),
+            ', '.join(stair_fail_ids),
+            '; '.join(stair_reasons) if stair_reasons else ''
+        ])
+
+        # Stair flights enclosure row
+        failing_flights = [f for f in flight_4wall if not f.get('fully_enclosed')]
+        passing_flights = [f for f in flight_4wall if f.get('fully_enclosed')]
+        flight_fail_ids = [f.get('flight_gid','') for f in failing_flights]
+        flight_reasons = [f"{f.get('flight_name','')}: sides_covered={f.get('sides_covered',0)}/4" for f in failing_flights]
+        ws.append([
+            'Stair flights (4-wall enclosure)',
+            len(passing_flights),
+            len(failing_flights),
+            ', '.join(flight_fail_ids),
+            '; '.join(flight_reasons) if flight_reasons else ''
+        ])
+
+        # Auto-size columns for readability
+        widths = {'A': 32, 'B': 16, 'C': 16, 'D': 36, 'E': 48}
+        for col, w in widths.items():
+            ws.column_dimensions[col].width = w
+
+        wb.save(path)
+
+    # Try Excel first
+    wrote_xlsx = False
+    try:
+        import openpyxl  # noqa: F401
+        _write_xlsx(xlsx_path)
+        wrote_xlsx = True
+    except Exception:
+        wrote_xlsx = False
+
+    # Always write CSV as a universal fallback
+    _write_csv(csv_path)
+
+    # Print clickable paths (absolute and file:// URLs with percent-encoding for spaces)
+    import urllib.parse as _url
+    csv_url = f"file://{_url.quote(csv_path)}"
+    def _osc8_link(url: str, text: str):
+        # OSC 8 hyperlink (supported by VS Code terminal, iTerm2)
+        return f"\u001b]8;;{url}\u0007{text}\u001b]8;;\u0007"
+    if wrote_xlsx:
+        xlsx_url = f"file://{_url.quote(xlsx_path)}"
+        print("\nExcel summary written to:", _osc8_link(xlsx_url, xlsx_path))
+        print("Click:", _osc8_link(xlsx_url, "Open Excel (.xlsx)"))
+        print("CSV summary also written to:", _osc8_link(csv_url, csv_path))
+        print("Click:", _osc8_link(csv_url, "Open CSV"))
+    else:
+        print("\nExcel not available (openpyxl missing).")
+        print("CSV summary written to:", _osc8_link(csv_url, csv_path))
+        print("Click:", _osc8_link(csv_url, "Open CSV"))
+
 
 if __name__ == '__main__':
     main()
