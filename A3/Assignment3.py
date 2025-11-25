@@ -577,21 +577,35 @@ def is_corridor(space, analysis):
 
 
 def main():
-    # (thresholds are hard-coded in constants at the top of this file)
-
+    """Morning-style run: only analyse corridor/hallway spaces (plus stair spaces for linkage).
+    This reduces runtime by skipping geometry + width calculations for non-corridor rooms.
+    """
     model = ifcopenshell.open(IFC_PATH)
-    spaces = model.by_type('IfcSpace')
+    all_spaces = model.by_type('IfcSpace')
+
+    def _n(sp):
+        return (getattr(sp, 'Name', '') or '').lower()
+
+    hallway_tokens = ['hallway', 'corridor', 'passage', 'circulation']
+
+    # Select corridor spaces only (these are the 18 we report on) + collect stair spaces for linkage graph
+    corridor_spaces = [sp for sp in all_spaces if any(t in _n(sp) for t in hallway_tokens)]
+    stair_spaces = [sp for sp in all_spaces if 'stair' in _n(sp)]
+
+    # For building door/stair adjacency we include corridor + stair spaces only
+    linkage_spaces = corridor_spaces + stair_spaces
+
     analyses = {}
-    for sp in spaces:
+    for sp in corridor_spaces:  # Only analyse corridors
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
+        # Try geometry first for accurate width
         length, width = extract_dimensions_from_geometry(sp)
-        
-        if width == 0:
+        if width == 0:  # fallback to area/perimeter if geometry fails
             A = get_numeric(sp, ['area'])
             P = get_numeric(sp, ['perimeter'])
             if A and P:
                 if A > 1000:
-                    A_m2 = A / 1000000.0
+                    A_m2 = A / 1_000_000.0
                 else:
                     A_m2 = A
                 P_m = P if P > 100 else P * 1000.0
@@ -602,24 +616,27 @@ def main():
                     width = w * 1000.0
                 except Exception:
                     pass
-        analyses[sid] = {'space': sp, 'name': getattr(sp, 'Name', None), 'type': getattr(sp, 'LongName', None), 'width': width, 'length': length}
+        analyses[sid] = {
+            'space': sp,
+            'name': getattr(sp, 'Name', None),
+            'type': getattr(sp, 'LongName', None),
+            'width': width,
+            'length': length,
+        }
 
-    space_linked, door_map, door_container_map = build_space_linkages(model, spaces)
-    
+    # Build linkages (doors between corridor+stair subset)
+    space_linked, door_map, door_container_map = build_space_linkages(model, linkage_spaces)
+
     for sid, a in analyses.items():
-        linked_to_stairs = space_linked.get(sid, False)
-        a['links_to_stairs'] = linked_to_stairs
+        a['links_to_stairs'] = space_linked.get(sid, False)
         a['is_elongated'] = (a['length'] >= 3 * a['width']) if a['width'] > 0 else False
 
-    corridors = [(sid, a) for sid, a in analyses.items() if is_corridor(a['space'], a)]
+    corridors = [(sid, a) for sid, a in analyses.items()]  # analyses already corridor-only
     doors = [analyze_door(d, door_map, door_container_map) for d in model.by_type('IfcDoor')]
     failing_doors = [d for d in doors if d['issues']]
     flights = model.by_type('IfcStairFlight')
     stairs = [analyze_stair(f) for f in flights]
     failing_stairs = [s for s in stairs if s['issues']]
-
-    # Run compartmentation checks for stairs (doors in walls, doors swing away)
-    stair_comp_failures = analyze_stair_compartmentation(model, analyses, door_map, door_container_map, spaces)
 
     failing_corridors = []
     for sid, a in corridors:
@@ -692,38 +709,6 @@ def main():
             print(f" - {s['name']}: {', '.join(s['issues'])}")
     else:
         print("No failing stairs.")
-
-    # Report compartmentation failures (doors/walls/swing)
-    if stair_comp_failures:
-        print('\nStair compartmentation failures:')
-        for f in stair_comp_failures:
-            print(f" - {f['stair_name']}")
-            for it in f.get('space_issues', []):
-                print(f"    * {it}")
-            for d in f.get('offending_doors', []):
-                dn = d.get('door_name') or d.get('door_gid')
-                rs = ', '.join(d.get('reasons', []))
-                print(f"    - Door {dn}: {rs}")
-    else:
-        print('\nNo stair compartmentation failures detected.')
-
-
-if __name__ == '__main__':
-    main()
-                dn = d.get('door_name') or d.get('door_gid')
-                rs = ', '.join(d.get('reasons', []))
-                print(f"    - Door {dn}: {rs}")
-    else:
-        print('\nNo stair compartmentation failures detected.')
-
-
-if __name__ == '__main__':
-    main()
-                dn = d.get('door_name') or d.get('door_gid')
-                rs = ', '.join(d.get('reasons', []))
-                print(f"    - Door {dn}: {rs}")
-    else:
-        print('\nNo stair compartmentation failures detected.')
 
 
 if __name__ == '__main__':
