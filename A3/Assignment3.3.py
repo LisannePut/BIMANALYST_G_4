@@ -5,31 +5,75 @@ import math
 import numpy as np
 import re
 
-# BR18 requirements (concise)
-# - Doors: clear opening width >= 800 mm (DOOR_MIN)
-# - Stairs: clear width >= 1000 mm (STAIR_MIN)
-# - Corridors: clear width >= 1300 mm (CORRIDOR_MIN) AND must link to a stair
-# The BR18 PDF is included in this folder as 'BR18.pdf' and referenced by
-# BR18_DOC_PATH below.
+"""
+BR18 Building Code Compliance Checker
+======================================
 
-# Config
+This script analyzes IFC building models for compliance with BR18 evacuation route requirements.
+
+BR18 Requirements Checked:
+- Doors: clear opening width >= 800 mm (DOOR_MIN)
+- Stairs: clear width >= 1000 mm (STAIR_MIN)
+- Corridors: clear width >= 1300 mm (CORRIDOR_MIN) AND must link to a stair
+- Stair flights: must be enclosed by walls (4-wall enclosure check)
+
+Reference: BR18.pdf included in this folder
+"""
+
+# ============================================================================
+# SECTION 1: IMPORTS AND CONFIGURATION
+# ============================================================================
+
+import os
+import sys
+import math
+import re as _re
+import numpy as np
+import ifcopenshell
+import ifcopenshell.geom
+
+# Configuration Constants
+# Configuration Constants
 IFC_PATH = os.path.join(os.path.dirname(__file__), "model", "25-16-D-ARCH.ifc")
-DOOR_MIN = 800
-STAIR_MIN = 1000
-CORRIDOR_MIN = 1300
-BUFFER_BBOX = 1000.0
-NEAREST_MAX = 30000.0
+DOOR_MIN = 800  # Minimum door width in mm
+STAIR_MIN = 1000  # Minimum stair width in mm
+CORRIDOR_MIN = 1300  # Minimum corridor width in mm
+BUFFER_BBOX = 1000.0  # Buffer for bounding box calculations
+NEAREST_MAX = 30000.0  # Maximum distance for proximity checks
 
-
-# Geometry settings for door midpoint calculation
+# Geometry settings for IFC shape extraction
 GEOM_SETTINGS = ifcopenshell.geom.settings()
 GEOM_SETTINGS.set(GEOM_SETTINGS.USE_WORLD_COORDS, True)
 
-# Simple in-memory bbox cache to avoid repeated shape computation
+
+# ============================================================================
+# SECTION 2: UTILITY FUNCTIONS - CACHING AND UNIT CONVERSION
+# ============================================================================
+
+# Performance optimization: Cache for storing computed bounding boxes
+# Key: (entity_type, GlobalId), Value: (xmin, ymin, xmax, ymax) in mm
+# This avoids expensive geometry recalculation when checking the same element multiple times
 _BBOX_CACHE = {}
 
 
 def to_mm(v):
+    """Convert a dimension value to millimeters.
+    
+    IFC files may store values in different units (meters or millimeters).
+    This function detects the unit and normalizes to millimeters:
+    - Values > 100 are assumed to already be in mm
+    - Values ≤ 100 are assumed to be in meters and are multiplied by 1000
+    
+    Args:
+        v: A numeric value (or convertible to float)
+    
+    Returns:
+        Float value in millimeters, or None if conversion fails
+    
+    Example:
+        to_mm(0.8) -> 800.0 (0.8 meters converted to mm)
+        to_mm(800) -> 800.0 (already in mm)
+    """
     try:
         f = float(v)
     except Exception:
@@ -37,11 +81,33 @@ def to_mm(v):
     return f if f > 100 else f * 1000.0
 
 
+# ============================================================================
+# SECTION 3: GEOMETRY EXTRACTION FUNCTIONS
+# ============================================================================
+
 def extract_dimensions_from_geometry(sp):
     """Extract width and length from IfcSpace geometry using 3D vertices.
     
-    ifcopenshell.geom returns coordinates in meters, but IFC file units are millimeters,
-    so we multiply by 1000 to convert.
+    This function calculates the physical dimensions of a space (like a corridor)
+    by analyzing its 3D geometry vertices and computing the bounding box.
+    
+    Process:
+    1. Get all 3D vertices (corner points) of the space geometry
+    2. Convert from meters to millimeters (multiply by 1000)
+    3. Find min/max coordinates to get bounding box
+    4. Calculate dimensions from bounding box
+    5. Return (length, width) where length is the longer horizontal dimension
+    
+    Args:
+        sp: An IfcSpace entity
+    
+    Returns:
+        Tuple (length_mm, width_mm): The longer and shorter horizontal dimensions in mm
+        Returns (0, 0) if geometry extraction fails
+    
+    Note:
+        ifcopenshell.geom returns coordinates in meters, but IFC file uses millimeters,
+        so we multiply by 1000 to convert.
     """
     try:
         verts = get_vertices(sp)
@@ -63,9 +129,21 @@ def extract_dimensions_from_geometry(sp):
 
 
 def get_vertices(product):
-    """Extract vertices from IFC product using world coordinates.
+    """Extract 3D vertices (corner points) from an IFC product's geometry.
     
-    Skip problematic geometry that hangs.
+    This function attempts to create a 3D shape from the IFC element and
+    extract all its vertex coordinates using world (absolute) coordinates.
+    
+    Args:
+        product: Any IFC product entity (door, wall, space, flight, etc.)
+    
+    Returns:
+        numpy array of shape (N, 3): Each row is [x, y, z] coordinate of a vertex
+        Returns None if geometry extraction fails or times out
+    
+    Note:
+        Uses GEOM_SETTINGS configured with USE_WORLD_COORDS for absolute positioning.
+        Skips problematic geometry that causes hangs or errors.
     """
     try:
         shape = ifcopenshell.geom.create_shape(GEOM_SETTINGS, product)
@@ -74,14 +152,42 @@ def get_vertices(product):
     except (KeyboardInterrupt, Exception):
         # Return None for any geometry error (includes timeouts/interrupts)
         return None
+
+
+# ============================================================================
+# SECTION 4: PROPERTY EXTRACTION FUNCTIONS
+# ============================================================================
+
 # NOTE: get_bbox and get_door_midpoint were removed because the code
 # now uses `get_vertices` + geometry-based centroids via
 # `get_element_centroid`. They were unused and are deleted to keep
 # the file clean.
 
 def get_numeric(entity, names):
+    """Extract a numeric property value from an IFC entity by searching multiple possible property names.
+    
+    This function searches for dimensional properties (like width, height) in an IFC element.
+    It checks three locations in order:
+    1. Direct attributes on the entity
+    2. Property sets (IfcPropertySet with IfcPropertySingleValue)
+    3. Quantity sets (IfcElementQuantity with length/area/volume quantities)
+    
+    The search is case-insensitive and uses partial matching (e.g., 'width' matches 'DoorWidth').
+    
+    Args:
+        entity: An IFC entity (door, stair, wall, etc.)
+        names: List of property name strings to search for (e.g., ['width', 'overallwidth'])
+    
+    Returns:
+        Float value in millimeters (converted via to_mm()), or None if not found
+    
+    Example:
+        get_numeric(door, ['overallwidth', 'width', 'doorwidth'])
+        -> Returns door width in mm from whichever property is found first
+    """
     names_l = [n.lower() for n in names]
-    # Attributes first
+    
+    # Step 1: Check direct attributes on the entity (e.g., entity.Width)
     for attr in dir(entity):
         try:
             if attr.lower() in names_l:
@@ -91,7 +197,8 @@ def get_numeric(entity, names):
                     return r
         except Exception:
             continue
-    # PSets and quantities
+    
+    # Step 2 & 3: Check property sets and quantity sets via IsDefinedBy relationships
     for rel in getattr(entity, 'IsDefinedBy', []) or []:
         try:
             if not rel.is_a('IfcRelDefinesByProperties'):
@@ -168,6 +275,10 @@ def get_element_centroid(elem):
     return None
 
 
+# ============================================================================
+# SECTION 5: SPACE CONNECTIVITY AND LINKAGE ANALYSIS
+# ============================================================================
+
 def build_space_bboxes(spaces):
     b = {}
     for sp in spaces:
@@ -197,10 +308,31 @@ def build_space_bboxes(spaces):
 
 def build_space_linkages(model, spaces):
     """Check if hallways connect to stair spaces via doors.
-
-    This builds adjacency between spaces that share a door opening, then
-    computes which hallways are linked to stairs either directly (door)
-    or transitively via other hallways (hallway -> hallway -> ... -> stair).
+    
+    This function builds a connectivity graph between spaces using doors as connections,
+    then determines which hallway spaces have a path to stair spaces (either directly
+    via a shared door, or indirectly through other hallways).
+    
+    Process:
+    1. Identify stair spaces (name contains 'stair') and hallway spaces (name contains 'hallway')
+    2. Build adjacency map: for each door, find which 2 spaces it connects
+    3. Mark hallways directly adjacent to stairs as 'linked'
+    4. Use breadth-first search to propagate linkage through hallway-to-hallway connections
+    5. Result: any hallway reachable from a stair (via hallways only) is 'linked'
+    
+    Args:
+        model: The IFC model
+        spaces: List of IfcSpace entities to analyze (subset of all spaces)
+    
+    Returns:
+        Tuple of (space_linked_to_stairs, door_map, door_container_map):
+        - space_linked_to_stairs: {space_gid: bool} indicating if space links to stairs
+        - door_map: {door_gid: set(space_gid)} showing which spaces each door connects
+        - door_container_map: {door_gid: [container_types]} showing wall types containing each door opening
+    
+    Note:
+        A hallway that connects to another hallway that connects to stairs is also linked.
+        This captures transitivity: hallway1 -> hallway2 -> stair means hallway1 is linked.
     """
     # Identify stair and hallway spaces
     stair_spaces = {}
@@ -398,7 +530,34 @@ def build_full_door_space_map(model, margin=1000):
     return door_map_all, door_container_map_all
 
 
+# ============================================================================
+# SECTION 6: COMPLIANCE ANALYSIS FUNCTIONS - DOORS, STAIRS, CORRIDORS
+# ============================================================================
+
 def analyze_door(door, door_map, opening_map):
+    """Analyze a door for BR18 compliance (minimum width requirement).
+    
+    BR18 Rule: Doors must have clear opening width >= 800mm (DOOR_MIN)
+    
+    Process:
+    1. Extract door name and GlobalId for identification
+    2. Try to get width from door properties using get_numeric()
+    3. If not found, try to extract from the opening's geometry (rectangle profile)
+    4. Check if width meets minimum requirement
+    5. Record which spaces this door connects to (from door_map)
+    
+    Args:
+        door: An IfcDoor entity
+        door_map: Dictionary mapping door_gid to set of connected space_gids
+        opening_map: Dictionary mapping door_gid to its IfcOpeningElement
+    
+    Returns:
+        Dict with keys:
+        - 'name': Full door identification (name + GlobalId)
+        - 'width_mm': Measured width in millimeters, or None if unknown
+        - 'linked_spaces': Set of space GlobalIds this door connects
+        - 'issues': List of issue strings (e.g., 'width 750mm < 800mm', 'width unknown')
+    """
     name = getattr(door, 'Name', None) or str(door)
     gid = getattr(door, 'GlobalId', None) or str(id(door))
     full = f"{name} [{gid}]"
@@ -427,6 +586,25 @@ def analyze_door(door, door_map, opening_map):
 
 
 def analyze_stair(flight):
+    """Analyze a stair flight for BR18 compliance (minimum width requirement).
+    
+    BR18 Rule: Stairs must have clear width >= 1000mm (STAIR_MIN)
+    
+    Process:
+    1. Extract flight name and GlobalId for identification
+    2. Try to get width from properties: 'actual run width', 'actualrunwidth', 'run width', 'width', 'tread'
+    3. If not found in properties, extract from geometry (rectangle profile dimensions)
+    4. Check if width meets minimum requirement (with small tolerance for rounding)
+    
+    Args:
+        flight: An IfcStairFlight entity
+    
+    Returns:
+        Dict with keys:
+        - 'name': Full flight identification (name + GlobalId)
+        - 'width_mm': Measured width in millimeters, or None if unknown
+        - 'issues': List of issue strings (e.g., 'width 950mm < 1000mm', 'width unknown')
+    """
     name = getattr(flight, 'Name', None) or str(flight)
     gid = getattr(flight, 'GlobalId', None) or str(id(flight))
     full = f"{name} [{gid}]"
@@ -452,6 +630,10 @@ def analyze_stair(flight):
         issues.append(f'width {width:.0f}mm < {STAIR_MIN}mm')
     return {'name': full, 'width_mm': width, 'issues': issues}
 
+
+# ============================================================================
+# SECTION 7: STAIRCASE GROUPING AND ENCLOSURE ANALYSIS
+# ============================================================================
 
 def analyze_staircase_groups(model):
     """Group IfcStairFlight elements by their base staircase identifier extracted from the Name.
@@ -692,77 +874,19 @@ def _bbox2d_mm(entity):
         return None
 
 
+# ============================================================================
+# SECTION 8: BOUNDING BOX AND GEOMETRIC HELPER FUNCTIONS
+# ============================================================================
+
 def _bbox_intersect(a, b, margin=0.0):
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
     return not (ax2 < bx1 - margin or bx2 < ax1 - margin or ay2 < by1 - margin or by2 < ay1 - margin)
 
 
-def analyze_stairflight_4wall_enclosure(model, side_margin=300.0, wall_search_expand=500.0):
-    """Simple 4-wall enclosure check for IfcStairFlight entities.
-
-    Returns list: {flight_name, flight_gid, fully_enclosed (bool), sides_covered, missing_sides}
-    Debug and wall listing removed per user request.
-    """
-    flights = model.by_type('IfcStairFlight')
-    if not flights:
-        return []
-    # Map element id to connected walls
-    flight_wall_map = {}
-    for rel in rels:
-        try:
-            a = getattr(rel, 'RelatingElement', None)
-            b = getattr(rel, 'RelatedElement', None)
-        except Exception:
-            continue
-        if not a or not b:
-            continue
-        # If one side is flight, other is wall
-        for flight, other in ((a, b), (b, a)):
-            try:
-                if flight.is_a('IfcStairFlight') and other.is_a('IfcWall'):
-                    gid = getattr(flight, 'GlobalId', None) or str(id(flight))
-                    wgid = getattr(other, 'GlobalId', None) or str(id(other))
-                    s = flight_wall_map.setdefault(gid, set())
-                    s.add(wgid)
-                if flight.is_a('IfcStairFlight') and other.is_a('IfcWallStandardCase'):
-                    gid = getattr(flight, 'GlobalId', None) or str(id(flight))
-                    wgid = getattr(other, 'GlobalId', None) or str(id(other))
-                    s = flight_wall_map.setdefault(gid, set())
-                    s.add(wgid)
-            except Exception:
-                continue
-    # Also include IfcRelConnectsWithRealizingElements relations
-    for rel in model.by_type('IfcRelConnectsWithRealizingElements'):
-        try:
-            rel_elem = getattr(rel, 'RelatingElement', None)
-            related_elems = list(getattr(rel, 'RelatedElements', []) or [])
-        except Exception:
-            continue
-        elems = []
-        if rel_elem:
-            elems.append(rel_elem)
-        elems.extend(related_elems)
-        # Check any pair (flight, wall)
-        flights = [e for e in elems if getattr(e, 'is_a', lambda *_: False)('IfcStairFlight')]
-        walls = [e for e in elems if getattr(e, 'is_a', lambda *_: False)('IfcWall') or getattr(e, 'is_a', lambda *_: False)('IfcWallStandardCase')]
-        for fl in flights:
-            gid = getattr(fl, 'GlobalId', None) or str(id(fl))
-            s = flight_wall_map.setdefault(gid, set())
-            for w in walls:
-                wgid = getattr(w, 'GlobalId', None) or str(id(w))
-                s.add(wgid)
-    results = []
-    for fl in flights:
-        gid = getattr(fl, 'GlobalId', None) or str(id(fl))
-        name = getattr(fl, 'Name', None) or f'Flight {gid}'
-        walls = flight_wall_map.get(gid, set())
-        wall_count = len(walls)
-        issues = []
-        if wall_count < 2:
-            issues.append(f'connected walls: {wall_count} (<2) - not between two enclosing walls')
-        results.append({'name': name, 'gid': gid, 'wall_count': wall_count, 'has_issue': bool(issues), 'issues': issues})
-    return results
+# ============================================================================
+# SECTION 9: STAIR FLIGHT ENCLOSURE CHECKS (4-WALL VERIFICATION)
+# ============================================================================
 
 def analyze_stair_flight_enclosure_proximity(model, side_margin=300.0, wall_search_expand=500.0):
     """Walls-only proximity enclosure for each IfcStairFlight (exclude floor side).
@@ -803,64 +927,6 @@ def analyze_stair_flight_enclosure_proximity(model, side_margin=300.0, wall_sear
         has_issue = sides_covered < 3
         results.append({'flight_name': name,'flight_gid': gid,'sides_covered': sides_covered,'missing_sides': missing,'has_issue': has_issue,'notes':[f'sides {sides_covered}/3']})
     return results
-
-
-def analyze_stair_entry_door_swings(model, door_map):
-    """Summarize swing directions for stair entry doors.
-
-    Entry door = connects exactly two spaces where one is a 'stair' space and the other is not.
-    Returns dict with counts and list of door records: { total, toward, away, unknown, records:[...] }
-    Each record: { door_name, door_gid, stair_name, swing }
-    """
-    # Collect stair spaces and names
-    stair_spaces = {}
-    for sp in model.by_type('IfcSpace'):
-        nm = (getattr(sp, 'Name', None) or '').lower()
-        if 'stair' in nm:
-            gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-            stair_spaces[gid] = getattr(sp, 'Name', None) or gid
-
-    if not stair_spaces:
-        return {'total': 0, 'toward': 0, 'away': 0, 'unknown': 0, 'records': []}
-
-    # Door entities by gid
-    doors_by_gid = {(getattr(d, 'GlobalId', None) or str(id(d))): d for d in model.by_type('IfcDoor')}
-
-    records = []
-    toward = away = unknown = 0
-    for door_gid, connected_space_gids in door_map.items():
-        sids = list(connected_space_gids)
-        # Check if one is stair and the other is not
-        has_stair = any(sid in stair_spaces for sid in sids)
-        has_non_stair = any(sid not in stair_spaces for sid in sids)
-        if has_stair and has_non_stair:
-            # pick the first stair space for reporting
-            stair_gid = next((sid for sid in sids if sid in stair_spaces), None)
-            stair_name = stair_spaces[stair_gid]
-            door = doors_by_gid.get(door_gid)
-            if not door:
-                continue
-            sw = _door_swing_heuristic(door)
-            if sw == 'toward':
-                toward += 1
-            elif sw == 'away':
-                away += 1
-            else:
-                unknown += 1
-            records.append({
-                'door_name': getattr(door, 'Name', None) or door_gid,
-                'door_gid': door_gid,
-                'stair_name': stair_name,
-                'swing': sw,
-            })
-
-    return {
-        'total': len(records),
-        'toward': toward,
-        'away': away,
-        'unknown': unknown,
-        'records': records,
-    }
 
 
 def analyze_stair_space_enclosure(model):
@@ -1413,16 +1479,48 @@ def summarize_stair_space_compliance(stair_compartmentation, prox_enclosure):
     return summary
 
 
+# ============================================================================
+# SECTION 10: MAIN ANALYSIS FUNCTION
+# ============================================================================
+
 def main():
-    """Morning-style run: only analyse corridor/hallway spaces (plus stair spaces for linkage).
-    This reduces runtime by skipping geometry + width calculations for non-corridor rooms.
+    """Main BR18 compliance analysis function - focused on corridor evacuation route checking.
+    
+    This "morning-style" optimized version analyzes only corridor/hallway spaces to reduce
+    runtime. It skips detailed geometry analysis for non-corridor rooms.
+    
+    BR18 Requirements Checked:
+    1. Doors: Clear opening width >= 800mm
+    2. Stairs: Clear width >= 1000mm  
+    3. Corridors: Clear width >= 1300mm AND must link to a stair (evacuation route)
+    4. Stair flights: Must be enclosed (between two walls minimum)
+    
+    Process:
+    1. Load IFC model and identify corridor + stair spaces by name
+    2. Extract corridor dimensions from geometry (width/length)
+    3. Build space connectivity graph using doors
+    4. Check which corridors link to stairs (directly or via other corridors)
+    5. Analyze all doors for width compliance
+    6. Analyze all stair flights for width compliance
+    7. Check stair flight enclosure (must be between at least 2 walls)
+    8. Group flights into staircases and check group-level enclosure
+    9. Generate timestamped Excel report with all findings
+    
+    Output:
+    - Excel file: analysis_summary_YYYYMMDD_HHMMSS.xlsx in A3 folder
+    - Console: Two lines with clickable file path
+    
+    Returns:
+        None (writes Excel file as side effect)
     """
     model = ifcopenshell.open(IFC_PATH)
     all_spaces = model.by_type('IfcSpace')
 
     def _n(sp):
+        """Helper function to get lowercase space name for token matching."""
         return (getattr(sp, 'Name', '') or '').lower()
 
+    # Define tokens that identify corridor/hallway spaces
     hallway_tokens = ['hallway', 'corridor', 'passage', 'circulation']
 
     # Select corridor spaces only (these are the 18 we report on) + collect stair spaces for linkage graph
@@ -1432,7 +1530,10 @@ def main():
     # For building door/stair adjacency we include corridor + stair spaces only
     linkage_spaces = corridor_spaces + stair_spaces
 
+    # Dictionary to store analysis results for each corridor
+    # Key: space GlobalId, Value: dict with space details and analysis results
     analyses = {}
+    
     for sp in corridor_spaces:  # Only analyse corridors
         sid = getattr(sp, 'GlobalId', None) or str(id(sp))
         # Try geometry first for accurate width
@@ -1477,6 +1578,7 @@ def main():
     stairs = [analyze_stair(f) for f in flights]
     failing_stairs = [s for s in stairs if s['issues']]
 
+    # Identify failing corridors (width < 1300mm OR no link to stairs)
     failing_corridors = []
     for sid, a in corridors:
         checks = 0; issues = []
@@ -1491,7 +1593,7 @@ def main():
         if checks < 2:
             failing_corridors.append({'name': f"{a.get('name')} [{sid}]", 'issues': issues})
 
-    # determine passing corridors (those in corridors but not in failing_corridors)
+    # Determine passing corridors (those not in failing list)
     failing_sids = set()
     for fc in failing_corridors:
         n = fc.get('name','')
@@ -1519,10 +1621,14 @@ def main():
             'passed': checks_passed,
         })
 
+    # ========================================================================
+    # STAIR FLIGHT ENCLOSURE CHECKS
+    # ========================================================================
+    
     # Simple 4-wall enclosure check for IfcStairFlight entities (FAST - no space analysis needed)
     flight_4wall = analyze_stairflight_4wall_enclosure(model)
 
-    # Staircase (flight group) summary
+    # Staircase (flight group) summary - groups flights by staircase ID
     staircase_groups = analyze_staircase_groups(model)
     storey_count = len(model.by_type('IfcBuildingStorey'))
     expected_groups = max(storey_count - 2, 0) * 3 if storey_count >= 3 else max(storey_count - 1, 0) * 3
@@ -1534,6 +1640,10 @@ def main():
     # Geometry-based stair space detection (may reveal additional stair spaces)
     geo_stair_spaces = identify_stair_spaces_geometry(model)
 
+    # ========================================================================
+    # EXCEL REPORT GENERATION
+    # ========================================================================
+    
     # Export summary to Excel (.xlsx) only with timestamp
     import os
     from datetime import datetime
@@ -1542,6 +1652,28 @@ def main():
     xlsx_path = os.path.join(base_dir, f'analysis_summary_{timestamp}.xlsx')
 
     def _write_xlsx(path):
+        """Generate Excel report with BR18 compliance results.
+        
+        Creates a single-sheet Excel file with:
+        - Requirements section (rows 1-6): Lists BR18 rules being checked
+        - Table header (row 7): Column headers with bold gray background
+        - Data rows (8-11): One row per category (Doors, Corridors, Stairs, Stair flights)
+        
+        Table structure:
+        Column A: Category name
+        Column B: Passing count (elements that meet requirements)
+        Column C: Failing count (elements that violate requirements)
+        Column D: Failing element IDs (vertical list, newline-separated)
+        Column E: Reason for failure (vertical list, newline-separated)
+        
+        Formatting:
+        - Text wrapping enabled for columns D & E (multi-line content)
+        - Fixed column widths for readability
+        - Vertical alignment = top for better readability of lists
+        
+        Args:
+            path: Full file path where Excel file will be saved
+        """
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill
         wb = Workbook()
@@ -1550,7 +1682,7 @@ def main():
         ws = wb.active
         ws.title = 'IFC_Compliance_Report'
 
-        # Requirements section at top
+        # Requirements section at top (rows 1-6)
         ws.append(['Requirements'])
         ws['A1'].font = Font(bold=True, size=12)
         ws.append(['- Doors: clear opening width ≥ 800 mm'])
@@ -1559,14 +1691,14 @@ def main():
         ws.append(['- Stair flights: must be enclosed by 4 walls (left, right, top, bottom)'])
         ws.append([''])
 
-        # Table header per your spec
+        # Table header (row 7) with formatting
         ws.append(['Category', 'Passing count', 'Failing count', "Failing element ID's", 'Reason for failure'])
         for c in ('A','B','C','D','E'):
             ws[f"{c}7"].font = Font(bold=True)
             ws[f"{c}7"].fill = PatternFill(start_color='FFEFEFEF', end_color='FFEFEFEF', fill_type='solid')
             ws[f"{c}7"].alignment = Alignment(horizontal='center')
 
-        # Doors row
+        # Row 8: Doors compliance data
         door_fail_ids = []  # we don't have IDs directly for failing doors in summary; leave empty or collect if available
         door_reasons = []
         for d in failing_doors:
@@ -1574,23 +1706,24 @@ def main():
             door_reasons.append('; '.join(d.get('issues', [])))
         ws.append([
             'Doors',
-            (len(doors) - len(failing_doors)),
-            len(failing_doors),
-            '\n'.join(door_fail_ids) if door_fail_ids else '',
-            '; '.join(door_reasons) if door_reasons else ''
+            (len(doors) - len(failing_doors)),  # Passing count
+            len(failing_doors),  # Failing count
+            '\n'.join(door_fail_ids) if door_fail_ids else '',  # Failing IDs (vertical list)
+            '; '.join(door_reasons) if door_reasons else ''  # Reasons (semicolon-separated)
         ])
         # Enable text wrapping for IDs and reasons columns
         ws['D8'].alignment = Alignment(wrap_text=True, vertical='top')
         ws['E8'].alignment = Alignment(wrap_text=True, vertical='top')
 
-        # Corridors row
+        # Row 9: Corridors compliance data
         corridor_fail_ids = []
         corridor_reasons = []
         for c in failing_corridors:
-            # Extract element ID from name like "Hallway:XXXXX [GID]" if present; otherwise leave empty
+            # Extract element ID from name like "Hallway:XXXXX [GID]" if present
             nm = c.get('name','')
             try:
                 if ':' in nm:
+                    # Parse ID from format "Hallway:1234567 [...]"
                     corridor_fail_ids.append(nm.split(':',1)[1].split()[0])
                 else:
                     corridor_fail_ids.append('')
@@ -1599,15 +1732,15 @@ def main():
             corridor_reasons.append('; '.join(c.get('issues', [])))
         ws.append([
             'Corridors',
-            len(passing_corridors),
-            len(failing_corridors),
-            '\n'.join(corridor_fail_ids) if corridor_fail_ids else '',
-            '\n'.join(corridor_reasons) if corridor_reasons else ''
+            len(passing_corridors),  # Passing count
+            len(failing_corridors),  # Failing count
+            '\n'.join(corridor_fail_ids) if corridor_fail_ids else '',  # Failing IDs (vertical list)
+            '\n'.join(corridor_reasons) if corridor_reasons else ''  # Reasons (vertical list with newlines)
         ])
         ws['D9'].alignment = Alignment(wrap_text=True, vertical='top')
         ws['E9'].alignment = Alignment(wrap_text=True, vertical='top')
 
-        # Stairs (width) row
+        # Row 10: Stairs (width) compliance data
         stair_fail_ids = []
         stair_reasons = []
         for s in failing_stairs:
@@ -1624,56 +1757,67 @@ def main():
         ws['D10'].alignment = Alignment(wrap_text=True, vertical='top')
         ws['E10'].alignment = Alignment(wrap_text=True, vertical='top')
 
-        # Stair flights enclosure row
+        # Row 11: Stair flights enclosure compliance data
         failing_flights = [f for f in flight_4wall if not f.get('fully_enclosed')]
         passing_flights = [f for f in flight_4wall if f.get('fully_enclosed')]
         flight_fail_ids = []
         flight_reasons = []
         for f in failing_flights:
             # Extract staircase ID and Run from name like "Assembled Stair:Stair:1282665 Run 3"
+            # Format as "1282665 Run 3" for readability
             name = f.get('flight_name', '')
             try:
                 if 'Stair:' in name and 'Run' in name:
                     # Extract number after last 'Stair:'
                     stair_part = name.split('Stair:')[-1]
-                    stair_id = stair_part.split()[0]
-                    # Extract Run part
+                    stair_id = stair_part.split()[0]  # Get numeric ID like "1282665"
+                    # Extract Run number
                     run_part = name.split('Run', 1)[1].strip() if 'Run' in name else ''
                     flight_fail_ids.append(f"{stair_id} Run {run_part}")
                 else:
                     flight_fail_ids.append(name)
             except Exception:
                 flight_fail_ids.append(name)
+            # Show how many sides are covered (e.g., "sides_covered=2/4")
             flight_reasons.append(f"sides_covered={f.get('sides_covered',0)}/4")
         ws.append([
             'Stair flights (4-wall enclosure)',
-            len(passing_flights),
-            len(failing_flights),
-            '\n'.join(flight_fail_ids) if flight_fail_ids else '',
-            '\n'.join(flight_reasons) if flight_reasons else ''
+            len(passing_flights),  # Passing count
+            len(failing_flights),  # Failing count
+            '\n'.join(flight_fail_ids) if flight_fail_ids else '',  # Failing IDs (vertical list)
+            '\n'.join(flight_reasons) if flight_reasons else ''  # Reasons (vertical list)
         ])
         ws['D11'].alignment = Alignment(wrap_text=True, vertical='top')
         ws['E11'].alignment = Alignment(wrap_text=True, vertical='top')
 
-        # Auto-size columns for readability
+        # Auto-size columns for optimal readability
         widths = {'A': 32, 'B': 16, 'C': 16, 'D': 36, 'E': 48}
         for col, w in widths.items():
             ws.column_dimensions[col].width = w
 
         wb.save(path)
 
-    # Generate Excel file
+    # Generate Excel file with timestamp
     try:
         import openpyxl  # noqa: F401
         _write_xlsx(xlsx_path)
         
-        # Print simple message with clickable link
+        # Print minimal console output with clickable file link (OSC 8 hyperlink protocol)
+        # This creates terminal hyperlinks that work in VS Code, iTerm2, and other modern terminals
         import urllib.parse as _url
         xlsx_url = f"file://{_url.quote(xlsx_path)}"
+        
         def _osc8_link(url: str, text: str):
-            # OSC 8 hyperlink (supported by VS Code terminal, iTerm2)
+            """Create OSC 8 terminal hyperlink (clickable link in terminal).
+            
+            Format: ESC ]8;;<URL> ESC \\ <TEXT> ESC ]8;; ESC \\
+            Where ESC = \u001b and ESC \\ = \u0007
+            """
             return f"\u001b]8;;{url}\u0007{text}\u001b]8;;\u0007"
         
+        # Output: Two lines only
+        # Line 1: Message + clickable file path
+        # Line 2: Explicit "Click:" instruction + clickable link text
         print("Results of the evacuation check:", _osc8_link(xlsx_url, xlsx_path))
         print("Click:", _osc8_link(xlsx_url, "Open Excel (.xlsx)"))
     except Exception as e:
