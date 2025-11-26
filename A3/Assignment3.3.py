@@ -1694,61 +1694,13 @@ def main():
             'passed': checks_passed,
         })
 
-    print(f"Amount of doors in model: {len(doors)}")
-    print(f"Amount of doors that don't fulfill the requirements: {len(failing_doors)}")
-    if failing_doors:
-        print("The names of the doors and what is not right with them:")
-        for d in failing_doors:
-            print(f" - {d['name']}: {', '.join(d['issues'])}")
-    else:
-        print("No failing doors.")
-
-    print(f"\nAmount of corridors: {len(corridors)}")
-    print(f"Amount of corridors that don't fulfill the requirements: {len(failing_corridors)}")
-    if failing_corridors:
-        print("The names of the corridors and what is not right with them:")
-        for c in failing_corridors:
-            print(f" - {c['name']}: {', '.join(c['issues'])}")
-    else:
-        print("No failing corridors.")
-
-    # Print passing (right) corridors
-    print(f"\nAmount of corridors that fulfill the requirements (passing): {len(passing_corridors)}")
-
-    print(f"\nAmount of stairs: {len(stairs)}")
-    print(f"Amount of stairs that don't fulfill the requirements: {len(failing_stairs)}")
-    if failing_stairs:
-        print("The names of the stairs and what is not right with them:")
-        for s in failing_stairs:
-            print(f" - {s['name']}: {', '.join(s['issues'])}")
-    else:
-        print("No failing stairs.")
-
     # Simple 4-wall enclosure check for IfcStairFlight entities (FAST - no space analysis needed)
     flight_4wall = analyze_stairflight_4wall_enclosure(model)
-    print('\n=== STAIR COMPARTMENTATION: 4-WALL ENCLOSURE (IfcStairFlight) ===')
-    for f in flight_4wall:
-        status = '✓' if f['fully_enclosed'] else '✗'
-        print(f"{status} {f['flight_name']} - {f['sides_covered']}/4 sides covered")
 
     # Staircase (flight group) summary
     staircase_groups = analyze_staircase_groups(model)
     storey_count = len(model.by_type('IfcBuildingStorey'))
     expected_groups = max(storey_count - 2, 0) * 3 if storey_count >= 3 else max(storey_count - 1, 0) * 3
-    # User specification indicated (storey_pairs * 3). Ambiguity in storey pairing for 7 storeys.
-    # We approximate expected by (storey_count - 2) * 3 to match 7->15 per user statement.
-    print('\n=== Staircase Flight Group Summary ===')
-    print(f'Unique staircase IDs (from flights): {len(staircase_groups)}')
-    print(f'Expected staircase groups (user spec): {expected_groups}')
-    standard = [g for g in staircase_groups if g['is_standard_3_run']]
-    non_standard = [g for g in staircase_groups if not g['is_standard_3_run']]
-    print(f'Standard 3-run staircases detected: {len(standard)}')
-    if non_standard:
-        print(f'Non-standard staircase flight sets (run pattern != 3 runs): {len(non_standard)}')
-    # List groups
-    for g in staircase_groups:
-        flag = '✓' if g['is_standard_3_run'] else '⚠'
-        print(f" {flag} Staircase ID {g['id']} flights={g['flight_count']} runs={', '.join(g['run_labels'])}")
 
     # Staircase group proximity enclosure check
     group_enclosure = analyze_staircase_group_enclosure(model)
@@ -1757,57 +1709,12 @@ def main():
     # Geometry-based stair space detection (may reveal additional stair spaces)
     geo_stair_spaces = identify_stair_spaces_geometry(model)
 
-    # Export summary to Excel (.xlsx) if available, otherwise fall back to CSV
+    # Export summary to Excel (.xlsx) only with timestamp
     import os
+    from datetime import datetime
     base_dir = os.path.dirname(__file__)
-    csv_path = os.path.join(base_dir, 'analysis_summary.csv')
-    xlsx_path = os.path.join(base_dir, 'analysis_summary.xlsx')
-
-    def _write_csv(path):
-        import csv
-        with open(path, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            # Header
-            writer.writerow(['category', 'item_id', 'item_name', 'status', 'reason_or_details'])
-
-            # Doors
-            writer.writerow([]); writer.writerow(['DOORS'])
-            writer.writerow(['summary', '', '', 'failing', len(failing_doors)])
-            writer.writerow(['summary', '', '', 'passing', len(doors) - len(failing_doors)])
-            for d in failing_doors:
-                writer.writerow([
-                    'door', '',
-                    d.get('name',''), 'fail', '; '.join(d.get('issues', []))
-                ])
-
-            # Corridors
-            writer.writerow([]); writer.writerow(['CORRIDORS'])
-            writer.writerow(['summary', '', '', 'failing', len(failing_corridors)])
-            writer.writerow(['summary', '', '', 'passing', len(passing_corridors)])
-            for c in failing_corridors:
-                writer.writerow(['corridor', '', c.get('name',''), 'fail', '; '.join(c.get('issues', []))])
-            for c in passing_corridors:
-                writer.writerow(['corridor', '', c.get('name',''), 'pass', ', '.join(c.get('passed', []))])
-
-            # Stairs (width compliance)
-            writer.writerow([]); writer.writerow(['STAIRS (width)'])
-            writer.writerow(['summary', '', '', 'failing', len(failing_stairs)])
-            writer.writerow(['summary', '', '', 'passing', len(stairs) - len(failing_stairs)])
-            for s in failing_stairs:
-                writer.writerow(['stair', '', s.get('name',''), 'fail', '; '.join(s.get('issues', []))])
-
-            # Stair Flights Enclosure (4 walls)
-            writer.writerow([]); writer.writerow(['STAIR FLIGHTS (4-wall enclosure)'])
-            failing_flights = [f for f in flight_4wall if not f.get('fully_enclosed')]
-            passing_flights = [f for f in flight_4wall if f.get('fully_enclosed')]
-            writer.writerow(['summary', '', '', 'failing', len(failing_flights)])
-            writer.writerow(['summary', '', '', 'passing', len(passing_flights)])
-            for f in failing_flights:
-                writer.writerow([
-                    'stair_flight', f.get('flight_gid',''), f.get('flight_name',''), 'fail', f"sides_covered={f.get('sides_covered',0)}/4"
-                ])
-            for f in passing_flights:
-                writer.writerow(['stair_flight', f.get('flight_gid',''), f.get('flight_name',''), 'pass', ''])
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    xlsx_path = os.path.join(base_dir, f'analysis_summary_{timestamp}.xlsx')
 
     def _write_xlsx(path):
         from openpyxl import Workbook
@@ -1844,9 +1751,12 @@ def main():
             'Doors',
             (len(doors) - len(failing_doors)),
             len(failing_doors),
-            ', '.join(door_fail_ids),
+            '\n'.join(door_fail_ids) if door_fail_ids else '',
             '; '.join(door_reasons) if door_reasons else ''
         ])
+        # Enable text wrapping for IDs and reasons columns
+        ws['D8'].alignment = Alignment(wrap_text=True, vertical='top')
+        ws['E8'].alignment = Alignment(wrap_text=True, vertical='top')
 
         # Corridors row
         corridor_fail_ids = []
@@ -1866,9 +1776,11 @@ def main():
             'Corridors',
             len(passing_corridors),
             len(failing_corridors),
-            ', '.join(corridor_fail_ids),
-            '; '.join(corridor_reasons) if corridor_reasons else ''
+            '\n'.join(corridor_fail_ids) if corridor_fail_ids else '',
+            '\n'.join(corridor_reasons) if corridor_reasons else ''
         ])
+        ws['D9'].alignment = Alignment(wrap_text=True, vertical='top')
+        ws['E9'].alignment = Alignment(wrap_text=True, vertical='top')
 
         # Stairs (width) row
         stair_fail_ids = []
@@ -1881,22 +1793,42 @@ def main():
             'Stairs (width)',
             (len(stairs) - len(failing_stairs)),
             len(failing_stairs),
-            ', '.join(stair_fail_ids),
+            '\n'.join(stair_fail_ids) if stair_fail_ids else '',
             '; '.join(stair_reasons) if stair_reasons else ''
         ])
+        ws['D10'].alignment = Alignment(wrap_text=True, vertical='top')
+        ws['E10'].alignment = Alignment(wrap_text=True, vertical='top')
 
         # Stair flights enclosure row
         failing_flights = [f for f in flight_4wall if not f.get('fully_enclosed')]
         passing_flights = [f for f in flight_4wall if f.get('fully_enclosed')]
-        flight_fail_ids = [f.get('flight_gid','') for f in failing_flights]
-        flight_reasons = [f"{f.get('flight_name','')}: sides_covered={f.get('sides_covered',0)}/4" for f in failing_flights]
+        flight_fail_ids = []
+        flight_reasons = []
+        for f in failing_flights:
+            # Extract staircase ID and Run from name like "Assembled Stair:Stair:1282665 Run 3"
+            name = f.get('flight_name', '')
+            try:
+                if 'Stair:' in name and 'Run' in name:
+                    # Extract number after last 'Stair:'
+                    stair_part = name.split('Stair:')[-1]
+                    stair_id = stair_part.split()[0]
+                    # Extract Run part
+                    run_part = name.split('Run', 1)[1].strip() if 'Run' in name else ''
+                    flight_fail_ids.append(f"{stair_id} Run {run_part}")
+                else:
+                    flight_fail_ids.append(name)
+            except Exception:
+                flight_fail_ids.append(name)
+            flight_reasons.append(f"sides_covered={f.get('sides_covered',0)}/4")
         ws.append([
             'Stair flights (4-wall enclosure)',
             len(passing_flights),
             len(failing_flights),
-            ', '.join(flight_fail_ids),
-            '; '.join(flight_reasons) if flight_reasons else ''
+            '\n'.join(flight_fail_ids) if flight_fail_ids else '',
+            '\n'.join(flight_reasons) if flight_reasons else ''
         ])
+        ws['D11'].alignment = Alignment(wrap_text=True, vertical='top')
+        ws['E11'].alignment = Alignment(wrap_text=True, vertical='top')
 
         # Auto-size columns for readability
         widths = {'A': 32, 'B': 16, 'C': 16, 'D': 36, 'E': 48}
@@ -1905,34 +1837,22 @@ def main():
 
         wb.save(path)
 
-    # Try Excel first
-    wrote_xlsx = False
+    # Generate Excel file
     try:
         import openpyxl  # noqa: F401
         _write_xlsx(xlsx_path)
-        wrote_xlsx = True
-    except Exception:
-        wrote_xlsx = False
-
-    # Always write CSV as a universal fallback
-    _write_csv(csv_path)
-
-    # Print clickable paths (absolute and file:// URLs with percent-encoding for spaces)
-    import urllib.parse as _url
-    csv_url = f"file://{_url.quote(csv_path)}"
-    def _osc8_link(url: str, text: str):
-        # OSC 8 hyperlink (supported by VS Code terminal, iTerm2)
-        return f"\u001b]8;;{url}\u0007{text}\u001b]8;;\u0007"
-    if wrote_xlsx:
+        
+        # Print simple message with clickable link
+        import urllib.parse as _url
         xlsx_url = f"file://{_url.quote(xlsx_path)}"
-        print("\nExcel summary written to:", _osc8_link(xlsx_url, xlsx_path))
+        def _osc8_link(url: str, text: str):
+            # OSC 8 hyperlink (supported by VS Code terminal, iTerm2)
+            return f"\u001b]8;;{url}\u0007{text}\u001b]8;;\u0007"
+        
+        print("Results of the evacuation check:", _osc8_link(xlsx_url, xlsx_path))
         print("Click:", _osc8_link(xlsx_url, "Open Excel (.xlsx)"))
-        print("CSV summary also written to:", _osc8_link(csv_url, csv_path))
-        print("Click:", _osc8_link(csv_url, "Open CSV"))
-    else:
-        print("\nExcel not available (openpyxl missing).")
-        print("CSV summary written to:", _osc8_link(csv_url, csv_path))
-        print("Click:", _osc8_link(csv_url, "Open CSV"))
+    except Exception as e:
+        print(f"Error: Could not generate Excel file. {e}")
 
 
 if __name__ == '__main__':
