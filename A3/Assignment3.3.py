@@ -945,33 +945,6 @@ def analyze_stairflight_4wall_enclosure(model, side_margin=300.0, wall_search_ex
 
 def main():
     """Main BR18 compliance analysis function - focused on corridor evacuation route checking.
-    
-    This "morning-style" optimized version analyzes only corridor/hallway spaces to reduce
-    runtime. It skips detailed geometry analysis for non-corridor rooms.
-    
-    BR18 Requirements Checked:
-    1. Doors: Clear opening width >= 800mm
-    2. Stairs: Clear width >= 1000mm  
-    3. Corridors: Clear width >= 1300mm AND must link to a stair (evacuation route)
-    4. Stair flights: Must be enclosed (between two walls minimum)
-    
-    Process:
-    1. Load IFC model and identify corridor + stair spaces by name
-    2. Extract corridor dimensions from geometry (width/length)
-    3. Build space connectivity graph using doors
-    4. Check which corridors link to stairs (directly or via other corridors)
-    5. Analyze all doors for width compliance
-    6. Analyze all stair flights for width compliance
-    7. Check stair flight enclosure (must be between at least 2 walls)
-    8. Group flights into staircases and check group-level enclosure
-    9. Generate timestamped Excel report with all findings
-    
-    Output:
-    - Excel file: analysis_summary_YYYYMMDD_HHMMSS.xlsx in A3 folder
-    - Console: Two lines with clickable file path
-    
-    Returns:
-        None (writes Excel file as side effect)
     """
     model = ifcopenshell.open(IFC_PATH)
     all_spaces = model.by_type('IfcSpace')
@@ -1113,26 +1086,6 @@ def main():
 
     def _write_xlsx(path):
         """Generate Excel report with BR18 compliance results.
-        
-        Creates a single-sheet Excel file with:
-        - Requirements section (rows 1-6): Lists BR18 rules being checked
-        - Table header (row 7): Column headers with bold gray background
-        - Data rows (8-11): One row per category (Doors, Corridors, Stairs, Stair flights)
-        
-        Table structure:
-        Column A: Category name
-        Column B: Passing count (elements that meet requirements)
-        Column C: Failing count (elements that violate requirements)
-        Column D: Failing element IDs (vertical list, newline-separated)
-        Column E: Reason for failure (vertical list, newline-separated)
-        
-        Formatting:
-        - Text wrapping enabled for columns D & E (multi-line content)
-        - Fixed column widths for readability
-        - Vertical alignment = top for better readability of lists
-        
-        Args:
-            path: Full file path where Excel file will be saved
         """
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment, PatternFill
