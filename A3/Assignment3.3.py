@@ -621,87 +621,92 @@ def analyze_staircase_group_enclosure(model, side_margin=300.0, wall_search_expa
 
 
 def identify_stair_spaces_geometry(model):
-    """Find doors that lead into each staircase flight group and classify their swing.
+    """Identify stair spaces by associating each IfcStairFlight centroid with a containing IfcSpace.
 
-    Logic:
-      - Retrieve staircase groups via analyze_staircase_groups (group id from flight names)
-      - Geometry map flights->spaces using identify_stair_spaces_geometry (centroid within space bbox)
-      - For each group, collect all spaces containing its flights
-      - Entry door for group: door connects exactly two spaces where one is in group's space set and the other isn't
-      - Classify door swing with _door_swing_heuristic
-    Returns list per group:
-      {
-        'group_id', 'flight_count', 'space_count',
-        'entry_doors': [ {'door_gid','door_name','swing'} ],
-        'counts': {'total','toward','away','unknown'}
-      }
+    This supplements name-based detection (spaces containing 'stair'). A space is flagged as a
+    stair space if at least one stair flight centroid lies inside its 2D bbox (with margin).
+    Returns a dict: {space_gid: {'space': space, 'name': name, 'flight_gids': set([...])}}
     """
-    groups = analyze_staircase_groups(model)
-    if not groups:
+    spaces = model.by_type('IfcSpace')
+    flights = model.by_type('IfcStairFlight')
+    # Precompute space bboxes
+    space_bbox = {}
+    for sp in spaces:
+        gid = getattr(sp, 'GlobalId', None) or str(id(sp))
+        bb = _bbox2d_mm(sp)
+        if bb:
+            space_bbox[gid] = bb
+    # Get flight centroids
+    flight_centroids = {}
+    for fl in flights:
+        verts = get_vertices(fl)
+        if verts is not None and len(verts) > 0:
+            verts = verts * 1000.0
+            c = verts.mean(axis=0)
+            flight_centroids[getattr(fl, 'GlobalId', None) or str(id(fl))] = (float(c[0]), float(c[1]))
+    # Associate
+    stair_spaces = {}
+    margin = 300.0
+    for fl_gid, (fx, fy) in flight_centroids.items():
+        for sp_gid, bb in space_bbox.items():
+            x1,y1,x2,y2 = bb
+            if (x1 - margin) <= fx <= (x2 + margin) and (y1 - margin) <= fy <= (y2 + margin):
+                sp = next((s for s in spaces if (getattr(s,'GlobalId',None) or str(id(s)))==sp_gid), None)
+                if sp is None:
+                    continue
+                entry = stair_spaces.setdefault(sp_gid, {'space': sp, 'name': getattr(sp,'Name',None) or sp_gid, 'flight_gids': set()})
+                entry['flight_gids'].add(fl_gid)
+    # Merge name-based spaces even if no flight caught (keep original 5)
+    for sp in spaces:
+        name_l = (getattr(sp,'Name',None) or '').lower()
+        if 'stair' in name_l:
+            sp_gid = getattr(sp,'GlobalId',None) or str(id(sp))
+            stair_spaces.setdefault(sp_gid, {'space': sp, 'name': getattr(sp,'Name',None) or sp_gid, 'flight_gids': set()})
+    return stair_spaces
+
+
+def _bbox2d_mm(entity):
+    """Return (xmin,ymin,xmax,ymax) in mm for an entity using geometry verts; None on failure."""
+    try:
+        # Cache by type + GlobalId
+        try:
+            gid = getattr(entity, 'GlobalId', None) or str(id(entity))
+            et = entity.is_a() if hasattr(entity, 'is_a') else type(entity).__name__
+            key = (et, gid)
+        except Exception:
+            key = None
+        if key and key in _BBOX_CACHE:
+            return _BBOX_CACHE[key]
+
+        verts = get_vertices(entity)
+        if verts is None or len(verts) == 0:
+            return None
+        verts = verts * 1000.0
+        minv = verts.min(axis=0)
+        maxv = verts.max(axis=0)
+        bb = (float(minv[0]), float(minv[1]), float(maxv[0]), float(maxv[1]))
+        if key:
+            _BBOX_CACHE[key] = bb
+        return bb
+    except Exception:
+        return None
+
+
+def _bbox_intersect(a, b, margin=0.0):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    return not (ax2 < bx1 - margin or bx2 < ax1 - margin or ay2 < by1 - margin or by2 < ay1 - margin)
+
+
+def analyze_stairflight_4wall_enclosure(model, side_margin=300.0, wall_search_expand=500.0):
+    """Simple 4-wall enclosure check for IfcStairFlight entities.
+
+    Returns list: {flight_name, flight_gid, fully_enclosed (bool), sides_covered, missing_sides}
+    Debug and wall listing removed per user request.
+    """
+    flights = model.by_type('IfcStairFlight')
+    if not flights:
         return []
-    geom_map = identify_stair_spaces_geometry(model)  # space_gid -> rec with flight_gids
-    # Build flight->space set mapping from geom_map
-    flight_to_spaces = {}
-    for sp_gid, rec in geom_map.items():
-        for fg in rec.get('flight_gids', []):
-            flight_to_spaces.setdefault(fg, set()).add(sp_gid)
-
-    # Pre-index flights by name for membership in group
-    flights = model.by_type('IfcStairFlight')
-    flight_name_map = { (getattr(fl,'GlobalId',None) or str(id(fl))): (getattr(fl,'Name',None) or '') for fl in flights }
-
-    # Door entities for naming
-    doors_by_gid = {(getattr(d,'GlobalId',None) or str(id(d))): d for d in model.by_type('IfcDoor')}
-
-    results = []
-    for g in groups:
-        gid = g['id']
-        # Gather flights that belong to this group
-        group_flight_gids = [fg for fg,name in flight_name_map.items() if gid in name]
-        # Spaces containing these flights
-        group_space_gids = set()
-        for fg in group_flight_gids:
-            group_space_gids.update(flight_to_spaces.get(fg, []))
-        entry_doors = []
-        toward = away = unknown = 0
-        for door_gid, connected_space_gids in door_map.items():
-            sids = list(connected_space_gids)
-            in_count = sum(1 for sid in sids if sid in group_space_gids)
-            # Accept doors that connect at least one group space and at least one non-group space
-            if in_count >= 1 and any(sid not in group_space_gids for sid in sids):
-                door = doors_by_gid.get(door_gid)
-                swing = _door_swing_heuristic(door) if door else 'unknown'
-                if swing == 'toward':
-                    toward += 1
-                elif swing == 'away':
-                    away += 1
-                else:
-                    unknown += 1
-                entry_doors.append({
-                    'door_gid': door_gid,
-                    'door_name': getattr(door,'Name',None) if door else door_gid,
-                    'swing': swing
-                })
-        results.append({
-            'group_id': gid,
-            'flight_count': g['flight_count'],
-            'space_count': len(group_space_gids),
-            'entry_doors': entry_doors,
-            'counts': {'total': len(entry_doors), 'toward': toward, 'away': away, 'unknown': unknown}
-        })
-    return results
-
-
-def analyze_stair_flight_enclosure(model):
-    """Check each IfcStairFlight is 'between walls' by counting connected walls.
-
-    Heuristic: Use IfcRelConnectsElements relationships. If a flight has fewer than 2
-    distinct connected walls it is flagged as an issue (not enclosed / missing boundary).
-    No geometry extraction performed.
-    Returns list of dicts: {name, gid, wall_count, has_issue, issues}
-    """
-    flights = model.by_type('IfcStairFlight')
-    rels = model.by_type('IfcRelConnectsElements')
     # Map element id to connected walls
     flight_wall_map = {}
     for rel in rels:
