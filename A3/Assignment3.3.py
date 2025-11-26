@@ -19,10 +19,7 @@ STAIR_MIN = 1000
 CORRIDOR_MIN = 1300
 BUFFER_BBOX = 1000.0
 NEAREST_MAX = 30000.0
-# BR18 PDF parsing has been removed. Use the hard-coded BR18 thresholds below.
 
-
-# PDF parsing removed: thresholds are hard-coded at the top of this file
 
 # Geometry settings for door midpoint calculation
 GEOM_SETTINGS = ifcopenshell.geom.settings()
@@ -456,184 +453,6 @@ def analyze_stair(flight):
     return {'name': full, 'width_mm': width, 'issues': issues}
 
 
-def is_corridor(space, analysis):
-    name = analysis.get('name') or ''
-    if any(k in (name or '').lower() for k in ['hallway', 'corridor', 'passage', 'circulation']):
-        return True
-    return False
-
-
-def _door_swing_heuristic(door):
-    """Try a simple heuristic to determine if a door swings away from an adjacent space.
-
-    Returns 'away', 'toward', or 'unknown'. This is a best-effort string-match heuristic
-    from door attributes (Name, ObjectType, Description, OperationType). If nothing
-    meaningful is found we return 'unknown'.
-    """
-    # Prefer explicit IFC attribute OperationType when available
-    try:
-        op = getattr(door, 'OperationType', None)
-        if op:
-            op_s = str(op).lower()
-            # Common textual/enum hints indicating outward/inward swing
-            if 'out' in op_s or 'outward' in op_s or 'opens_out' in op_s or 'open_out' in op_s:
-                return 'away'
-            if 'in' in op_s or 'inward' in op_s or 'opens_in' in op_s or 'open_in' in op_s:
-                return 'toward'
-            # Some enumerations include SWING + direction, try to detect 'swing' with qualifier
-            if 'swing' in op_s:
-                if 'out' in op_s or 'outward' in op_s:
-                    return 'away'
-                if 'in' in op_s or 'inward' in op_s:
-                    return 'toward'
-    except Exception:
-        pass
-
-    # Fallback: inspect other textual attributes (Name, ObjectType, Description, Tag)
-    candidates = []
-    for attr in ('PredefinedType', 'ObjectType', 'Name', 'Description', 'Tag'):
-        try:
-            v = getattr(door, attr, None)
-            if v:
-                candidates.append(str(v).lower())
-        except Exception:
-            continue
-
-    txt = ' '.join(candidates)
-    if not txt:
-        return 'unknown'
-
-    if 'outward' in txt or 'opens out' in txt or 'opens away' in txt or 'open out' in txt or 'open outwards' in txt:
-        return 'away'
-    if 'inward' in txt or 'opens in' in txt or 'open in' in txt or 'opens into' in txt or 'into' in txt:
-        return 'toward'
-    if 'swing' in txt:
-        if 'out' in txt or 'outward' in txt:
-            return 'away'
-        if 'in' in txt or 'inward' in txt:
-            return 'toward'
-
-    return 'unknown'
-
-
-def analyze_stair_compartmentation(model, door_map, door_container_map, use_geometry=False):
-    """ULTRA-FAST stair compartmentation check - NO GEOMETRY EXTRACTION.
-
-    Rule set enforced per stair space (multi-storey context assumed if building has >1 storey):
-        1. Exactly one ENTRY door must exist (door linking stair space to exactly one NON-stair space)
-        2. That door must be contained in / related to a wall (compartmentation boundary)
-        3. That door must swing TOWARD the stair (heuristic text-based swing detection)
-        4. Unknown swing is flagged (cannot verify compliance)
-
-    A door is classified as an ENTRY door only if:
-        - The door_map shows the door connects to the stair space AND
-        - Connects to at least one non-stair space AND
-        - Connects to exactly 2 spaces total (stair + one other) to reduce false positives.
-
-    Returns a list of stair result dicts including:
-        stair_name, door_count, offending_doors (list), stair_reasons (list), has_issues (bool)
-    """
-    results = []
-
-    # Quick lookup of doors by GlobalId
-    doors_by_gid = {(getattr(d, 'GlobalId', None) or str(id(d))): d for d in model.by_type('IfcDoor')}
-
-    # Check if building has multiple storeys
-    storeys = model.by_type('IfcBuildingStorey')
-    if len(storeys) < 2:
-        return results  # Single storey building, no multi-storey stairs possible
-
-    if use_geometry:
-        # Use geometry-derived mapping, but FILTER OUT spaces that are not actually stairs by name
-        geom_map = identify_stair_spaces_geometry(model)
-        stair_spaces = []
-        stair_space_gids = set()
-        for gid, rec in geom_map.items():
-            nm = (rec.get('name') or '').lower()
-            if 'stair' in nm:  # exclude hallways mislabeled as stair spaces by geometry
-                stair_spaces.append({'gid': gid, 'name': rec.get('name')})
-                stair_space_gids.add(gid)
-        # Also include any name-based stair spaces that geometry missed
-        for space in model.by_type('IfcSpace'):
-            nm = (getattr(space, 'Name', None) or '').lower()
-            if 'stair' in nm:
-                gid = getattr(space, 'GlobalId', None) or str(id(space))
-                if gid not in stair_space_gids:
-                    stair_spaces.append({'gid': gid, 'name': getattr(space, 'Name', None)})
-                    stair_space_gids.add(gid)
-    else:
-        # Name-based only
-        stair_spaces = []
-        stair_space_gids = set()
-        for space in model.by_type('IfcSpace'):
-            name = (getattr(space, 'Name', None) or '').lower()
-            if 'stair' in name:
-                gid = getattr(space, 'GlobalId', None) or str(id(space))
-                stair_spaces.append({'gid': gid, 'name': getattr(space, 'Name', None)})
-                stair_space_gids.add(gid)
-
-    if not stair_spaces:
-        return results  # No stair spaces found (geometry or name based)
-
-    # For each stair space, find ENTRY doors (doors connecting stair to non-stair spaces)
-    for stair_space in stair_spaces:
-        stair_gid = stair_space['gid']
-        stair_name = stair_space['name']
-
-        # Identify entry doors meeting criteria
-        entry_doors = []
-        for door_gid, connected_space_gids in door_map.items():
-            if stair_gid not in connected_space_gids:
-                continue
-            other_spaces = [sid for sid in connected_space_gids if sid != stair_gid]
-            has_non_stair = any(sid not in stair_space_gids for sid in other_spaces)
-            # Relax: accept doors that connect stair + any non-stair (even if >2 spaces due to modeling)
-            if has_non_stair:
-                entry_doors.append(door_gid)
-
-        # Stair-level reasons (missing or multiple entry doors)
-        stair_reasons = []
-        if len(entry_doors) == 0:
-            stair_reasons.append('no entry door found (expected exactly 1)')
-        elif len(entry_doors) > 1:
-            stair_reasons.append(f'{len(entry_doors)} entry doors found (expected exactly 1)')
-
-        # Door-level checks
-        offending_doors = []
-        for dg in entry_doors:
-            door = doors_by_gid.get(dg)
-            if door is None:
-                continue
-            reason_parts = []
-            conts = door_container_map.get(dg, [])
-            in_wall = any('IfcWall' in c for c in conts)
-            if not in_wall:
-                reason_parts.append('door not in wall (compartmentation required)')
-            swing = _door_swing_heuristic(door)
-            if swing == 'away':
-                reason_parts.append('swings away from stair (should swing toward stair)')
-            elif swing == 'unknown':
-                reason_parts.append('swing direction unknown')
-            if reason_parts:
-                offending_doors.append({
-                    'door_gid': dg,
-                    'reasons': reason_parts,
-                    'door_name': getattr(door, 'Name', None)
-                })
-
-        has_issues = bool(stair_reasons or offending_doors)
-        results.append({
-            'stair_name': stair_name or f'Stair space [{stair_gid}]',
-            'door_count': len(entry_doors),
-            'offending_doors': offending_doors,
-            'stair_reasons': stair_reasons,
-            'has_issues': has_issues,
-            'geometry_based': use_geometry
-        })
-
-    return results
-
-
 def analyze_staircase_groups(model):
     """Group IfcStairFlight elements by their base staircase identifier extracted from the Name.
 
@@ -800,7 +619,8 @@ def analyze_staircase_group_enclosure(model, side_margin=300.0, wall_search_expa
         results.append({'id': sid, 'flight_count': g['flight_count'], 'sides_covered': sides_covered, 'missing_sides': missing, 'has_issue': has_issue, 'source': source})
     return results
 
-def analyze_staircase_group_entry_doors(model, door_map):
+
+def identify_stair_spaces_geometry(model):
     """Find doors that lead into each staircase flight group and classify their swing.
 
     Logic:
