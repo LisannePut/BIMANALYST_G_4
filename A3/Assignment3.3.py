@@ -58,21 +58,6 @@ _BBOX_CACHE = {}
 
 def to_mm(v):
     """Convert a dimension value to millimeters.
-    
-    IFC files may store values in different units (meters or millimeters).
-    This function detects the unit and normalizes to millimeters:
-    - Values > 100 are assumed to already be in mm
-    - Values ≤ 100 are assumed to be in meters and are multiplied by 1000
-    
-    Args:
-        v: A numeric value (or convertible to float)
-    
-    Returns:
-        Float value in millimeters, or None if conversion fails
-    
-    Example:
-        to_mm(0.8) -> 800.0 (0.8 meters converted to mm)
-        to_mm(800) -> 800.0 (already in mm)
     """
     try:
         f = float(v)
@@ -87,27 +72,6 @@ def to_mm(v):
 
 def extract_dimensions_from_geometry(sp):
     """Extract width and length from IfcSpace geometry using 3D vertices.
-    
-    This function calculates the physical dimensions of a space (like a corridor)
-    by analyzing its 3D geometry vertices and computing the bounding box.
-    
-    Process:
-    1. Get all 3D vertices (corner points) of the space geometry
-    2. Convert from meters to millimeters (multiply by 1000)
-    3. Find min/max coordinates to get bounding box
-    4. Calculate dimensions from bounding box
-    5. Return (length, width) where length is the longer horizontal dimension
-    
-    Args:
-        sp: An IfcSpace entity
-    
-    Returns:
-        Tuple (length_mm, width_mm): The longer and shorter horizontal dimensions in mm
-        Returns (0, 0) if geometry extraction fails
-    
-    Note:
-        ifcopenshell.geom returns coordinates in meters, but IFC file uses millimeters,
-        so we multiply by 1000 to convert.
     """
     try:
         verts = get_vertices(sp)
@@ -133,17 +97,6 @@ def get_vertices(product):
     
     This function attempts to create a 3D shape from the IFC element and
     extract all its vertex coordinates using world (absolute) coordinates.
-    
-    Args:
-        product: Any IFC product entity (door, wall, space, flight, etc.)
-    
-    Returns:
-        numpy array of shape (N, 3): Each row is [x, y, z] coordinate of a vertex
-        Returns None if geometry extraction fails or times out
-    
-    Note:
-        Uses GEOM_SETTINGS configured with USE_WORLD_COORDS for absolute positioning.
-        Skips problematic geometry that causes hangs or errors.
     """
     try:
         shape = ifcopenshell.geom.create_shape(GEOM_SETTINGS, product)
@@ -165,25 +118,6 @@ def get_vertices(product):
 
 def get_numeric(entity, names):
     """Extract a numeric property value from an IFC entity by searching multiple possible property names.
-    
-    This function searches for dimensional properties (like width, height) in an IFC element.
-    It checks three locations in order:
-    1. Direct attributes on the entity
-    2. Property sets (IfcPropertySet with IfcPropertySingleValue)
-    3. Quantity sets (IfcElementQuantity with length/area/volume quantities)
-    
-    The search is case-insensitive and uses partial matching (e.g., 'width' matches 'DoorWidth').
-    
-    Args:
-        entity: An IFC entity (door, stair, wall, etc.)
-        names: List of property name strings to search for (e.g., ['width', 'overallwidth'])
-    
-    Returns:
-        Float value in millimeters (converted via to_mm()), or None if not found
-    
-    Example:
-        get_numeric(door, ['overallwidth', 'width', 'doorwidth'])
-        -> Returns door width in mm from whichever property is found first
     """
     names_l = [n.lower() for n in names]
     
@@ -308,31 +242,8 @@ def build_space_bboxes(spaces):
 
 def build_space_linkages(model, spaces):
     """Check if hallways connect to stair spaces via doors.
-    
-    This function builds a connectivity graph between spaces using doors as connections,
-    then determines which hallway spaces have a path to stair spaces (either directly
-    via a shared door, or indirectly through other hallways).
-    
-    Process:
-    1. Identify stair spaces (name contains 'stair') and hallway spaces (name contains 'hallway')
-    2. Build adjacency map: for each door, find which 2 spaces it connects
-    3. Mark hallways directly adjacent to stairs as 'linked'
-    4. Use breadth-first search to propagate linkage through hallway-to-hallway connections
-    5. Result: any hallway reachable from a stair (via hallways only) is 'linked'
-    
-    Args:
-        model: The IFC model
-        spaces: List of IfcSpace entities to analyze (subset of all spaces)
-    
-    Returns:
-        Tuple of (space_linked_to_stairs, door_map, door_container_map):
-        - space_linked_to_stairs: {space_gid: bool} indicating if space links to stairs
-        - door_map: {door_gid: set(space_gid)} showing which spaces each door connects
-        - door_container_map: {door_gid: [container_types]} showing wall types containing each door opening
-    
     Note:
         A hallway that connects to another hallway that connects to stairs is also linked.
-        This captures transitivity: hallway1 -> hallway2 -> stair means hallway1 is linked.
     """
     # Identify stair and hallway spaces
     stair_spaces = {}
@@ -444,13 +355,6 @@ def build_space_linkages(model, spaces):
 
 def build_full_door_space_map(model, margin=1000):
     """Build a complete door->space connectivity map over ALL IfcSpace elements.
-
-    Heuristics combined:
-      1. Opening/door centroid inside space bbox (+margin)
-      2. Door bbox (expanded by margin) intersects space bbox
-    This widens detection of doors connecting to stair spaces that were missed by
-    centroid-only logic. Also returns door->container element types.
-    Returns (door_map_all, door_container_map_all)
     """
     spaces_list = list(model.by_type('IfcSpace'))
     # Precompute space bboxes
@@ -536,27 +440,6 @@ def build_full_door_space_map(model, margin=1000):
 
 def analyze_door(door, door_map, opening_map):
     """Analyze a door for BR18 compliance (minimum width requirement).
-    
-    BR18 Rule: Doors must have clear opening width >= 800mm (DOOR_MIN)
-    
-    Process:
-    1. Extract door name and GlobalId for identification
-    2. Try to get width from door properties using get_numeric()
-    3. If not found, try to extract from the opening's geometry (rectangle profile)
-    4. Check if width meets minimum requirement
-    5. Record which spaces this door connects to (from door_map)
-    
-    Args:
-        door: An IfcDoor entity
-        door_map: Dictionary mapping door_gid to set of connected space_gids
-        opening_map: Dictionary mapping door_gid to its IfcOpeningElement
-    
-    Returns:
-        Dict with keys:
-        - 'name': Full door identification (name + GlobalId)
-        - 'width_mm': Measured width in millimeters, or None if unknown
-        - 'linked_spaces': Set of space GlobalIds this door connects
-        - 'issues': List of issue strings (e.g., 'width 750mm < 800mm', 'width unknown')
     """
     name = getattr(door, 'Name', None) or str(door)
     gid = getattr(door, 'GlobalId', None) or str(id(door))
@@ -587,23 +470,6 @@ def analyze_door(door, door_map, opening_map):
 
 def analyze_stair(flight):
     """Analyze a stair flight for BR18 compliance (minimum width requirement).
-    
-    BR18 Rule: Stairs must have clear width >= 1000mm (STAIR_MIN)
-    
-    Process:
-    1. Extract flight name and GlobalId for identification
-    2. Try to get width from properties: 'actual run width', 'actualrunwidth', 'run width', 'width', 'tread'
-    3. If not found in properties, extract from geometry (rectangle profile dimensions)
-    4. Check if width meets minimum requirement (with small tolerance for rounding)
-    
-    Args:
-        flight: An IfcStairFlight entity
-    
-    Returns:
-        Dict with keys:
-        - 'name': Full flight identification (name + GlobalId)
-        - 'width_mm': Measured width in millimeters, or None if unknown
-        - 'issues': List of issue strings (e.g., 'width 950mm < 1000mm', 'width unknown')
     """
     name = getattr(flight, 'Name', None) or str(flight)
     gid = getattr(flight, 'GlobalId', None) or str(id(flight))
@@ -885,115 +751,12 @@ def _bbox_intersect(a, b, margin=0.0):
 
 
 # ============================================================================
-# SECTION 9: STAIR FLIGHT ENCLOSURE CHECKS (4-WALL VERIFICATION)
 # ============================================================================
-
-def analyze_stair_flight_enclosure_proximity(model, side_margin=300.0, wall_search_expand=500.0):
-    """Walls-only proximity enclosure for each IfcStairFlight (exclude floor side).
-
-    Passing condition: all 3 vertical sides (left/right/top) have intersecting wall bboxes.
-    Returns list with per-flight enclosure status.
-    """
-    flights = model.by_type('IfcStairFlight')
-    walls = list(model.by_type('IfcWall')) + list(model.by_type('IfcWallStandardCase'))
-    wall_bboxes = []
-    for w in walls:
-        wb = _bbox2d_mm(w)
-        if wb:
-            wall_bboxes.append(wb)
-    results = []
-    for fl in flights:
-        gid = getattr(fl,'GlobalId',None) or str(id(fl))
-        name = getattr(fl,'Name',None) or f'Flight {gid}'
-        bb = _bbox2d_mm(fl)
-        if not bb:
-            results.append({'flight_name': name,'flight_gid': gid,'sides_covered':0,'missing_sides':['left','right','top'],'has_issue':True,'notes':['no geometry']})
-            continue
-        x1,y1,x2,y2 = bb
-        strips = {
-            'left':   (x1 - wall_search_expand, y1 - wall_search_expand, x1 + side_margin, y2 + wall_search_expand),
-            'right':  (x2 - side_margin,       y1 - wall_search_expand, x2 + wall_search_expand, y2 + wall_search_expand),
-            'top':    (x1 - wall_search_expand, y2 - side_margin,       x2 + wall_search_expand, y2 + wall_search_expand),
-        }
-        covered = {k: False for k in strips}
-        for wb in wall_bboxes:
-            for k, strip in strips.items():
-                if not covered[k] and _bbox_intersect(strip, wb):
-                    covered[k] = True
-            if all(covered.values()):
-                break
-        sides_covered = sum(1 for v in covered.values() if v)
-        missing = [k for k,v in covered.items() if not v]
-        has_issue = sides_covered < 3
-        results.append({'flight_name': name,'flight_gid': gid,'sides_covered': sides_covered,'missing_sides': missing,'has_issue': has_issue,'notes':[f'sides {sides_covered}/3']})
-    return results
-
-
-def analyze_stair_space_enclosure(model):
-    """Check if each 'stair' IfcSpace is fully enclosed by walls using IfcRelSpaceBoundary.
-
-    Rule: For each stair space, consider only PHYSICAL space boundaries. All such boundaries
-    must reference a wall element (IfcWall or IfcWallStandardCase). If none are present,
-    or if any physical boundary is not a wall, the space is flagged.
-
-    Returns list of dicts per space: {
-        'stair_name', 'stair_gid', 'physical_boundaries', 'wall_boundaries', 'has_issue', 'issues'
-    }
-    """
-    stair_spaces = [sp for sp in model.by_type('IfcSpace') if 'stair' in (getattr(sp, 'Name', '') or '').lower()]
-    if not stair_spaces:
-        return []
-
-    # Pre-collect space boundaries grouped by RelatingSpace gid
-    by_space = {}
-    for rb in model.by_type('IfcRelSpaceBoundary'):
-        try:
-            sp = getattr(rb, 'RelatingSpace', None)
-            if not sp:
-                continue
-            gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-            by_space.setdefault(gid, []).append(rb)
-        except Exception:
-            continue
-
-    results = []
-    for sp in stair_spaces:
-        gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-        name = getattr(sp, 'Name', None) or gid
-        rbs = by_space.get(gid, [])
-        phys = 0
-        wall_phys = 0
-        issues = []
-        for rb in rbs:
-            try:
-                pv = getattr(rb, 'PhysicalOrVirtualBoundary', None)
-                pv_s = str(pv).lower() if pv is not None else ''
-                if 'physical' not in pv_s and pv_s != '' and pv_s != 'none':
-                    # skip non-physical
-                    continue
-                # Treat empty pv as physical if unspecified
-                phys += 1
-                el = getattr(rb, 'RelatedBuildingElement', None)
-                if el and (el.is_a('IfcWall') or el.is_a('IfcWallStandardCase')):
-                    wall_phys += 1
-            except Exception:
-                continue
-
-        if phys == 0:
-            issues.append('no physical space boundaries found for stair space')
-        elif wall_phys < phys:
-            issues.append(f'only {wall_phys}/{phys} physical boundaries are walls')
-
-        results.append({
-            'stair_name': name,
-            'stair_gid': gid,
-            'physical_boundaries': phys,
-            'wall_boundaries': wall_phys,
-            'has_issue': bool(issues),
-            'issues': issues,
-        })
-
-    return results
+# SECTION 9: STAIR FLIGHT ENCLOSURE & GEOMETRY HELPERS
+# ============================================================================
+# This section contains helper functions and the main 4-wall enclosure check
+# for stair flights (analyze_stairflight_4wall_enclosure).
+# ============================================================================
 
 def identify_stair_spaces_geometry(model):
     """Identify stair spaces by associating each IfcStairFlight centroid with a containing IfcSpace.
@@ -1073,196 +836,6 @@ def _bbox_intersect(a, b, margin=0.0):
     return not (ax2 < bx1 - margin or bx2 < ax1 - margin or ay2 < by1 - margin or by2 < ay1 - margin)
 
 
-def analyze_stair_space_enclosure_proximity(model, side_margin=300.0, wall_search_expand=500.0):
-    """Proximity-based stair space enclosure (vertical walls only).
-
-    A stair space passes enclosure if walls are detected adjacent to all three
-    vertical perimeter sides: left, right, top (floor side ignored).
-    Returns list per stair space: {stair_name, stair_gid, sides_covered, missing_sides, has_issue, notes}
-    """
-    # Collect stair spaces
-    stair_spaces = [sp for sp in model.by_type('IfcSpace') if 'stair' in (getattr(sp, 'Name', '') or '').lower()]
-    if not stair_spaces:
-        return []
-
-    # Collect walls and storey containment mapping
-    walls = list(model.by_type('IfcWall')) + list(model.by_type('IfcWallStandardCase'))
-    wall_to_storey = {}
-    space_to_storey = {}
-    for rel in model.by_type('IfcRelContainedInSpatialStructure'):
-        parent = getattr(rel, 'RelatingStructure', None)
-        if parent and parent.is_a('IfcBuildingStorey'):
-            for e in getattr(rel, 'RelatedElements', []) or []:
-                try:
-                    gid = getattr(e, 'GlobalId', None) or str(id(e))
-                    if e.is_a('IfcWall') or e.is_a('IfcWallStandardCase'):
-                        wall_to_storey[gid] = parent
-                    if e.is_a('IfcSpace'):
-                        space_to_storey[gid] = parent
-                except Exception:
-                    continue
-
-    # Precompute wall bboxes by storey lazily
-    wall_bboxes_by_storey = {}
-
-    results = []
-    for sp in stair_spaces:
-        sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-        sp_name = getattr(sp, 'Name', None) or sp_gid
-        sb = _bbox2d_mm(sp)
-        if sb is None:
-            results.append({'stair_name': sp_name, 'stair_gid': sp_gid, 'sides_covered': 0, 'missing_sides': ['left','right','top'], 'has_issue': True, 'notes': ['no geometry available for space bbox']})
-            continue
-        sx1, sy1, sx2, sy2 = sb
-        storey = space_to_storey.get(sp_gid)
-
-        # Get walls in the same storey if available else all walls
-        candidate_walls = []
-        if storey:
-            sid = getattr(storey, 'GlobalId', None) or str(id(storey))
-            if sid not in wall_bboxes_by_storey:
-                # compute bboxes for walls in this storey
-                wall_bboxes_by_storey[sid] = []
-                for w in walls:
-                    w_gid = getattr(w, 'GlobalId', None) or str(id(w))
-                    if wall_to_storey.get(w_gid) is storey:
-                        wb = _bbox2d_mm(w)
-                        if wb:
-                            wall_bboxes_by_storey[sid].append((w_gid, wb))
-            candidate_walls = wall_bboxes_by_storey[sid]
-        else:
-            # fall back to all walls (slow)
-            if 'ALL' not in wall_bboxes_by_storey:
-                wall_bboxes_by_storey['ALL'] = []
-                for w in walls:
-                    wb = _bbox2d_mm(w)
-                    if wb:
-                        wall_bboxes_by_storey['ALL'].append((getattr(w, 'GlobalId', None) or str(id(w)), wb))
-            candidate_walls = wall_bboxes_by_storey['ALL']
-
-        # Build side strips (exclude floor side): only left/right/top for vertical enclosure
-        strips = {
-            'left':   (sx1 - wall_search_expand, sy1 - wall_search_expand, sx1 + side_margin, sy2 + wall_search_expand),
-            'right':  (sx2 - side_margin,       sy1 - wall_search_expand, sx2 + wall_search_expand, sy2 + wall_search_expand),
-            'top':    (sx1 - wall_search_expand, sy2 - side_margin,       sx2 + wall_search_expand, sy2 + wall_search_expand),
-        }
-
-        covered = {k: False for k in strips}
-        for _, wb in candidate_walls:
-            for k, strip in strips.items():
-                if not covered[k] and _bbox_intersect(strip, wb):
-                    covered[k] = True
-        sides_covered = sum(1 for v in covered.values() if v)
-        missing = [k for k, v in covered.items() if not v]
-        # Require all 3 vertical sides
-        has_issue = sides_covered < 3
-        note = [f"sides covered: {sides_covered}/3"]
-        results.append({
-            'stair_name': sp_name,
-            'stair_gid': sp_gid,
-            'sides_covered': sides_covered,
-            'missing_sides': missing,
-            'has_issue': has_issue,
-            'notes': note,
-        })
-
-    return results
-
-
-def analyze_stair_simple_4wall_enclosure(model, side_margin=300.0, wall_search_expand=500.0):
-    """Simple 4-wall enclosure check for stair spaces (ignores doors completely).
-
-    Checks if each stair space has walls on all 4 sides: left, right, top, bottom.
-    Returns list: {stair_name, stair_gid, fully_enclosed (bool), sides_covered, missing_sides}
-    """
-    stair_spaces = [sp for sp in model.by_type('IfcSpace') if 'stair' in (getattr(sp, 'Name', '') or '').lower()]
-    if not stair_spaces:
-        return []
-
-    walls = list(model.by_type('IfcWall')) + list(model.by_type('IfcWallStandardCase'))
-    wall_to_storey = {}
-    space_to_storey = {}
-    for rel in model.by_type('IfcRelContainedInSpatialStructure'):
-        parent = getattr(rel, 'RelatingStructure', None)
-        if parent and parent.is_a('IfcBuildingStorey'):
-            for e in getattr(rel, 'RelatedElements', []) or []:
-                try:
-                    gid = getattr(e, 'GlobalId', None) or str(id(e))
-                    if e.is_a('IfcWall') or e.is_a('IfcWallStandardCase'):
-                        wall_to_storey[gid] = parent
-                    if e.is_a('IfcSpace'):
-                        space_to_storey[gid] = parent
-                except Exception:
-                    continue
-
-    wall_bboxes_by_storey = {}
-    results = []
-    
-    for sp in stair_spaces:
-        sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-        sp_name = getattr(sp, 'Name', None) or sp_gid
-        sb = _bbox2d_mm(sp)
-        if sb is None:
-            results.append({
-                'stair_name': sp_name,
-                'stair_gid': sp_gid,
-                'fully_enclosed': False,
-                'sides_covered': 0,
-                'missing_sides': ['left','right','top','bottom']
-            })
-            continue
-        
-        sx1, sy1, sx2, sy2 = sb
-        storey = space_to_storey.get(sp_gid)
-
-        candidate_walls = []
-        if storey:
-            sid = getattr(storey, 'GlobalId', None) or str(id(storey))
-            if sid not in wall_bboxes_by_storey:
-                wall_bboxes_by_storey[sid] = []
-                for w in walls:
-                    w_gid = getattr(w, 'GlobalId', None) or str(id(w))
-                    if wall_to_storey.get(w_gid) is storey:
-                        wb = _bbox2d_mm(w)
-                        if wb:
-                            wall_bboxes_by_storey[sid].append((w_gid, wb))
-            candidate_walls = wall_bboxes_by_storey[sid]
-        else:
-            if 'ALL' not in wall_bboxes_by_storey:
-                wall_bboxes_by_storey['ALL'] = []
-                for w in walls:
-                    wb = _bbox2d_mm(w)
-                    if wb:
-                        wall_bboxes_by_storey['ALL'].append((getattr(w, 'GlobalId', None) or str(id(w)), wb))
-            candidate_walls = wall_bboxes_by_storey['ALL']
-
-        # Build all 4 side strips
-        strips = {
-            'left':   (sx1 - wall_search_expand, sy1 - wall_search_expand, sx1 + side_margin, sy2 + wall_search_expand),
-            'right':  (sx2 - side_margin,       sy1 - wall_search_expand, sx2 + wall_search_expand, sy2 + wall_search_expand),
-            'top':    (sx1 - wall_search_expand, sy2 - side_margin,       sx2 + wall_search_expand, sy2 + wall_search_expand),
-            'bottom': (sx1 - wall_search_expand, sy1 - wall_search_expand, sx2 + wall_search_expand, sy1 + side_margin),
-        }
-
-        covered = {k: False for k in strips}
-        for _, wb in candidate_walls:
-            for k, strip in strips.items():
-                if not covered[k] and _bbox_intersect(strip, wb):
-                    covered[k] = True
-        
-        sides_covered = sum(1 for v in covered.values() if v)
-        missing = [k for k, v in covered.items() if not v]
-        fully_enclosed = (sides_covered == 4)
-        
-        results.append({
-            'stair_name': sp_name,
-            'stair_gid': sp_gid,
-            'fully_enclosed': fully_enclosed,
-            'sides_covered': sides_covered,
-            'missing_sides': missing
-        })
-
-    return results
 
 
 def analyze_stairflight_4wall_enclosure(model, side_margin=300.0, wall_search_expand=500.0):
@@ -1364,119 +937,6 @@ def analyze_stairflight_4wall_enclosure(model, side_margin=300.0, wall_search_ex
         })
 
     return results
-
-
-def analyze_stair_space_elements(model, door_map, margin=300.0):
-    """List nearby elements for each stair space via bbox intersection.
-
-    Returns list per stair space:
-      {
-        'stair_name','stair_gid',
-        'walls': [{'name','gid'}],
-        'doors': [{'name','gid'}],
-        'flights': [{'name','gid'}],
-      }
-    """
-    stair_spaces = [sp for sp in model.by_type('IfcSpace') if 'stair' in (getattr(sp, 'Name', '') or '').lower()]
-    walls = list(model.by_type('IfcWall')) + list(model.by_type('IfcWallStandardCase'))
-    doors = model.by_type('IfcDoor')
-    flights = model.by_type('IfcStairFlight')
-
-    # Build containment map to restrict walls to same storey as stair space
-    wall_to_storey = {}
-    space_to_storey = {}
-    for rel in model.by_type('IfcRelContainedInSpatialStructure'):
-        parent = getattr(rel, 'RelatingStructure', None)
-        if parent and parent.is_a('IfcBuildingStorey'):
-            for e in getattr(rel, 'RelatedElements', []) or []:
-                try:
-                    gid = getattr(e, 'GlobalId', None) or str(id(e))
-                    if e.is_a('IfcWall') or e.is_a('IfcWallStandardCase'):
-                        wall_to_storey[gid] = parent
-                    if e.is_a('IfcSpace'):
-                        space_to_storey[gid] = parent
-                except Exception:
-                    continue
-
-    results = []
-    for sp in stair_spaces:
-        sb = _bbox2d_mm(sp)
-        if not sb:
-            continue
-        sx1, sy1, sx2, sy2 = sb
-        # Expand space bbox slightly
-        ext = (sx1 - margin, sy1 - margin, sx2 + margin, sy2 + margin)
-        items = {'walls': [], 'doors': [], 'flights': []}
-        # Restrict walls by storey
-        storey = space_to_storey.get(getattr(sp, 'GlobalId', None) or str(id(sp)))
-        for w in walls:
-            if storey:
-                w_gid = getattr(w, 'GlobalId', None) or str(id(w))
-                if wall_to_storey.get(w_gid) is not storey:
-                    continue
-            wb = _bbox2d_mm(w)
-            if wb and _bbox_intersect(ext, wb):
-                items['walls'].append({'name': getattr(w, 'Name', None) or '', 'gid': getattr(w, 'GlobalId', None) or str(id(w))})
-        # Doors: only those linked to this stair space (from door_map)
-        sp_gid = getattr(sp, 'GlobalId', None) or str(id(sp))
-        door_gids = [dg for dg, sids in door_map.items() if sp_gid in sids]
-        doors_by_gid = {(getattr(d, 'GlobalId', None) or str(id(d))): d for d in doors}
-        for dg in door_gids:
-            d = doors_by_gid.get(dg)
-            if not d:
-                continue
-            db = _bbox2d_mm(d)
-            if db and _bbox_intersect(ext, db):
-                items['doors'].append({'name': getattr(d, 'Name', None) or '', 'gid': dg})
-        for fl in flights:
-            fb = _bbox2d_mm(fl)
-            if fb and _bbox_intersect(ext, fb):
-                items['flights'].append({'name': getattr(fl, 'Name', None) or '', 'gid': getattr(fl, 'GlobalId', None) or str(id(fl))})
-        results.append({
-            'stair_name': getattr(sp, 'Name', None) or '',
-            'stair_gid': getattr(sp, 'GlobalId', None) or str(id(sp)),
-            **items,
-        })
-    return results
-
-
-def summarize_stair_space_compliance(stair_compartmentation, prox_enclosure):
-    """Build compact PASS/FAIL per stair space using proximity enclosure and door checks.
-
-    Pass = (sides_covered==3) AND (door_count==1) AND (no offending_doors)
-    """
-    # index proximity by stair name
-    prox_by_name = {p['stair_name']: p for p in prox_enclosure}
-    summary = []
-    for rec in stair_compartmentation:
-        name = rec.get('stair_name')
-        door_count = rec.get('door_count', 0)
-        offending = rec.get('offending_doors', [])
-        prox = prox_by_name.get(name)
-        sides = prox.get('sides_covered', 0) if prox else 0
-        enclosed_ok = sides == 3
-        door_ok = (door_count == 1)
-        swing_ok = (len(offending) == 0)
-        passed = enclosed_ok and door_ok and swing_ok
-        reasons = []
-        if not enclosed_ok:
-            reasons.append(f'enclosure {sides}/3 sides')
-        if not door_ok:
-            reasons.append(f'entry doors={door_count} (expected 1)')
-        # collect swing specific reasons if any
-        for d in offending:
-            for r in d.get('reasons', []):
-                if 'swings' in r or 'swing' in r:
-                    reasons.append(r)
-        summary.append({
-            'stair_name': name,
-            'passed': passed,
-            'enclosure_sides': sides,
-            'door_count': door_count,
-            'swing_ok': swing_ok,
-            'reasons': reasons,
-        })
-    return summary
 
 
 # ============================================================================
