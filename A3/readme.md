@@ -18,6 +18,8 @@ Another key capability of the tool is its validation of hallway spaces. Instead 
 
 After completing its analysis, the tool generates a structured Excel report that clearly summarizes all findings. It displays the number of passing and failing doors, staircases, and hallways, along with the IDs of the failing elements and their corresponding failure reasons.
 
+The tool mainly focuses on the relationships between spaces by checking how rooms, hallways, and staircases are connected. This space connectivity analysis ensures that evacuation routes form a continuous and functional path throughout the building.
+
 ## Instructions to run the tool:
 
 - Download all the necessary softwares such as Visual Studio Code, Blender and Github.
