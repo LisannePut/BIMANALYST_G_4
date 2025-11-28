@@ -33,7 +33,6 @@ Another key capability of the tool is its validation of hallway spaces. Instead 
 After completing its analysis, the tool generates a structured Excel report that clearly summarizes all findings. It displays the number of passing and failing doors, staircases, and hallways, along with the IDs of the failing elements and their corresponding failure reasons.
 
 ## Procedural Overview of Tutorial
-
 The tutorial is divided into 10 sections:
 
 1. **Imports and Configuration** - Required libraries and BR18 threshold constants
