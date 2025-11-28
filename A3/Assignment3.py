@@ -337,7 +337,7 @@ def build_space_linkages(model, spaces):
     while q:
         current = q.popleft()
         for nb in adjacency.get(current, set()):
-            if nb in hallway_spaces and nb not in linked_hallways:
+            if nb in hallway_spaces and nb not in linked_hallways: 
                 linked_hallways.add(nb)
                 q.append(nb)
 
@@ -503,17 +503,6 @@ def analyze_stair(flight):
 
 def analyze_staircase_groups(model):
     """Group IfcStairFlight elements by their base staircase identifier extracted from the Name.
-
-    Example flight names observed:
-      Assembled Stair:Stair:1282665 Run 1
-      Assembled Stair:Stair:1282665 Run 2
-      Assembled Stair:Stair:1282665 Run 3
-
-    We extract the numeric id after the last 'Stair:' token (here 1282665).
-    Each unique id represents one staircase between two storeys according to user spec.
-
-    Returns list of staircase dicts:
-      { 'id': <numeric str>, 'flight_count': N, 'run_labels': [...], 'is_standard_3_run': bool }
     """
     flights = model.by_type('IfcStairFlight')
     groups = {}
@@ -563,15 +552,7 @@ def analyze_staircase_groups(model):
 def analyze_staircase_group_enclosure(model, side_margin=300.0, wall_search_expand=500.0, debug_group_id=None):
     """Proximity enclosure check per staircase flight group.
 
-    Improvement over previous version:
-      - Prefer union of associated stair *space* bboxes (geometry-identified) instead of raw flight bboxes.
-        This aligns group enclosure with space-level enclosure logic and avoids artificial open sides
-        introduced by irregular flight arrangement (e.g. landing offsets making union larger than real shaft).
-      - Fallback to flight union if no spaces found.
-      - Optional debug output for a specific staircase id to inspect chosen bboxes and side coverage.
-
     Passing condition: all 4 sides covered by at least one wall bbox intersection.
-    Returns list of dicts: {id, flight_count, sides_covered, missing_sides, has_issue, source}
     """
     groups = analyze_staircase_groups(model)
     if not groups:
@@ -670,10 +651,6 @@ def analyze_staircase_group_enclosure(model, side_margin=300.0, wall_search_expa
 
 def identify_stair_spaces_geometry(model):
     """Identify stair spaces by associating each IfcStairFlight centroid with a containing IfcSpace.
-
-    This supplements name-based detection (spaces containing 'stair'). A space is flagged as a
-    stair space if at least one stair flight centroid lies inside its 2D bbox (with margin).
-    Returns a dict: {space_gid: {'space': space, 'name': name, 'flight_gids': set([...])}}
     """
     spaces = model.by_type('IfcSpace')
     flights = model.by_type('IfcStairFlight')
@@ -1230,7 +1207,7 @@ def main():
         
         # Output: Two lines only
         # Line 1: Message + clickable file path
-        # Line 2: Explicit "Click:" instruction + clickable link text
+        # Line 2: Explicit "Click:"  instruction + clickable link text
         print("Results of the evacuation check:", _osc8_link(xlsx_url, xlsx_path))
         print("Click:", _osc8_link(xlsx_url, "Open Excel (.xlsx)"))
     except Exception as e:
