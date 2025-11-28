@@ -14,11 +14,9 @@ The evacuation compliance checking tool is a Python-based application designed t
 
 Once an IFC model is provided, the tool begins by identifying all relevant building components, such as doors, corridors, spaces, walls, staircases, and stair flights. It calculates door widths using the actual opening geometry rather than relying solely on a declared property, ensuring higher accuracy. The tool also measures the widths of corridors and stair flights based on their bounding box geometries. For staircases, it reconstructs the enclosure by checking whether the surrounding elements are walls, as required for the compartmentation (which is part of the fire safety).
 
-Another key capability of the tool is its validation of hallway spaces. Instead of assuming that spaces named Hallway are correct, the script checks whether they truly function as circulation corridors by verifying their connection with stairs and minimum width (to be fire-safe). The tool maps the connectivity between spaces. Together, these checks ensure that escape routes in the model are geometrically correct, fire-safe, and logically connected.
+Another key capability of the tool is its validation of hallway spaces. Instead of assuming that spaces named Hallway are correct, the script checks whether they truly function as circulation corridors by verifying their connection with stairs and minimum width (to be fire-safe). The tool mainly focusses on the connectivity between spaces. Together, these checks ensure that escape routes in the model are geometrically correct, fire-safe, and logically connected.
 
 After completing its analysis, the tool generates a structured Excel report that clearly summarizes all findings. It displays the number of passing and failing doors, staircases, and hallways, along with the IDs of the failing elements and their corresponding failure reasons.
-
-The tool mainly focuses on the relationships between spaces by checking how rooms, hallways, and staircases are connected. This space connectivity analysis ensures that evacuation routes form a continuous and functional path throughout the building.
 
 ## Instructions to run the tool:
 
