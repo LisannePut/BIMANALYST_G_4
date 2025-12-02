@@ -1,1 +1,90 @@
+# Learning experience for focused concept
+
+## Developed Level Throughout the Course
+
+At the beginning of the course, we knew almost nothing about BIM—not even the basic principles—and we were unfamiliar with IfcOpenShell. We had some experience with Python, but we had never used GitHub before. During the first assignments, we struggled quite a bit with the whole GitHub process and lost some time getting used to it. As the assignments progressed, we gained more insight into how to use GitHub and how to understand the model through the code. We also started to see the value and purpose of BIM.
+
+Because we already had a broad architectural background, Assignment 2 (creating the flowchart) went more smoothly. This task required us to understand the building itself and define the principles of our chosen topic within the focus area. Translating this understanding into code for A3 and A4, and then analyzing that code to interpret the model and identify potential errors, was more challenging. However, we eventually learned how to properly analyze a model and gained a much better understanding of the code. The most important lesson we learned is that many imperfections can exist within a model, and these can significantly influence the BIM analysis.
+
+## Other Things We Still Need to Learn
+
+One thing we still need to learn more about is the role of the manager. Understanding this would help us better grasp how the work of the analysts is combined, as well as the challenges that come with this process. As analysts, this would allow us to better anticipate these issues and ensure smoother interaction between the different roles. The separate pieces of code would then become clearer and more easily form a coherent whole.
+
+## OpenBIM in the Future
+
+OpenBIM is definitely something we would use again, especially to check a design—particularly in the early stages—for errors and to optimize it as soon as possible. This helps avoid the high costs associated with changes made later in the design process.
+
+## Process of developing the tutorial
+
+### Did the process of the course enable you to answer or define questions that you might need later for your thesis?
+
+Yes. The course helped us formulate potential research questions. While examining the IFC model, we encountered numerous inconsistencies and errors, especially regarding naming conventions and other parameters that differed across models. This highlighted the need for a more generalised approach to model checking—one that works across various models without depending on specific naming structures. Such an approach could greatly increase the efficiency of the checking process and forms a strong basis for a potential thesis topic.
+
+### Would you have preferred to have been given less choice in the use cases?
+
+No, this was not an issue for us. The large variety of options was actually positive, and we chose topics that align closely with our background in architecture. Circulation routes, for example, are a central part of building design, and we had already explored these thoroughly in earlier design projects in Belgium. Therefore, the level of freedom in choosing a use case was appropriate.
+
+### Was the number of tools for the course ok - should we have more or less? If so which ones would you leave out?
+
+Although the course introduced many different tools, they generally worked well together and aligned with the assignments. That said, being confronted with so many tools at the start can be quite overwhelming, but at the end we felt it was the right amount.
+
+## Summary of feedback on tutorial from others
+
+The tutorial was clearly explained, and the tool fulfilled its intended purpose: checking the fire evacuation routes. It was also appreciated that we visualised the Excel results directly in the model, creating a clear physical translation.
+
+However, our tool turned out to be quite specific. A more general tool—for example one that checks the overall fire safety of the building, including additional elements such as façade components—could make it more widely applicable. It would also help if the tool were less dependent on object naming conventions, since the current version requires the model to follow certain naming rules to function correctly.
+
+Another point raised by the manager was that the analysts all submitted documents in different formats. This made it difficult and inefficient to work with. It would be more effective if all analysts agreed beforehand on which formats they would use.
+
+We received feedback as well that our coding tutorial could function not only for people who make a code but also as guidance for modellers. The code outputs revealed several modelling issues, indirectly demonstrating how models should be structured and where common mistakes occur. As a result, the tutorial not only explains the code but also helps users understand how to create more consistent and accurate models. This was considered a valuable added benefit.
+
+Lastly, we used bounding boxes to determine object dimensions when these were not provided. Caution is needed here: in models where elements are rotated and not orthogonally aligned, bounding boxes may not rotate with the object (see figure below). This can lead to incorrect dimensions because the bounding box does not follow the actual shape of the element. In our model this was not an issue, as the objects were not rotated.
+
+Afbeelding met schets, tekening, diagram, Lijnillustraties
+
+Door AI gegenereerde inhoud is mogelijk onjuist.
+
+The stage that the tool we created works in Advanced Building Design is already mentioned in one of the previous assignments.
+
+## (individual) Future for advanced use of OpenBIM
+
+### HUGO
+
+#### Are you likely to use OpenBIM tools in your thesis?
+
+I am not likely to use the tools themselves directly in my thesis, as my study track in Belgium is less focused on BIM and coding, and more oriented towards architectural and urban context. However, I will take many lessons from this course into my thesis work. The assignments taught me to approach problems in a different, more structured way, and I now clearly see the value of BIM and the relationship between code and model. Even if I do not use the tools explicitly, the mindset and analytical methods will definitely influence my thesis.
+
+#### Are you likely to use OpenBIM tools in your professional life in the next 10 years?
+
+If I work in the field of architecture, it is very likely that I will encounter OpenBIM tools, as the industry is becoming increasingly digital. More and more aspects of the design and construction process are described through algorithms, data, and models. Because of this ongoing evolution, there is a strong possibility that I will use OpenBIM tools in my professional practice.
+
+#### Wrap up
+
+At the start of the course, I felt quite overwhelmed by the concept of BIM. I wasn’t entirely sure what the purpose of the course was or what we were ultimately working towards. However, as my focus area was architecture, I gradually became more familiar with the material and started to get a better grasp of the overall direction. I began to understand how a piece of developed code could be applied to a spatial model and how the two related.
+
+Assignment A3, however, was more challenging. I ran into many coding issues, as well as imperfections in the IFC model. These obstacles made progress difficult. Eventually, I regained clarity by returning to what I am most familiar with: the architectural perspective. By fully analysing the IFC model its, I developed a much better understanding of what was happening in the code and why certain things had not worked initially.
+
+This approach also helps me understand the feedback we received on our tutorial—that our tool was at times too specific. That specificity largely came from the fact that we solved problems based on one particular model and then incorporated those solutions directly into the code.
+
+Looking back, I’m glad that this course helped me see the value of BIM. I will definitely take this way of thinking with me in the future.
+
+### LISANNE
+
+#### Are you likely to use OpenBIM tools in your thesis?
+
+If possible, I would like to use OpenBIM tools in my thesis, as they are highly relevant to my studies in Belgium. By integrating these tools, I could analyze the technical aspects of certain buildings and perform faster, additional checks using digital models. I find this particularly interesting, and I believe that OpenBIM will become increasingly important in the architecture sector. Therefore, exploring these tools in more depth would be a valuable addition to my research.
+
+#### Are you likely to use OpenBIM tools in your professional life in the next 10 years?
+
+Because I aim to work as an architectural engineer and would like to perform structural calculations in my future career, I believe that OpenBIM tools can be highly useful. These tools can help accelerate progress in the construction industry and enable us to design and build in a much more optimized way.
+
+#### Wrap up
+
+Because this was my first real introduction to the concept of BIM, I initially felt quite overwhelmed and didn’t really know what to expect. The course content seemed a bit vague at first, and it felt as though I was missing some background information. However, after going through the course website, I began to understand the purpose of the course much better. Being part of the architecture focus group also made me feel more at ease, since I already had a lot of background knowledge in that area. Writing the first code in Assignment 1 helped me grasp the idea of coding linked to model checking.
+
+Assignment 2 also went very smoothly: creating the flowchart was much easier thanks to the background knowledge I had gained in previous years. Assignment 3, on the other hand, was more challenging. Writing the longer piece of code was far less straightforward, partly because I haven’t had much exposure to programming in recent years, and partly because the model contained some complexities that made certain checks more difficult. In the end, these challenges led me to gain even more insights into IFC models and how they should ideally be structured. Through this assignment, I improved both my coding skills and my understanding of BIM models.
+
+The feedback we received after the tutorial provided additional insights, both regarding the code and the way it was presented. I learned that such a tool would be even more effective if it could operate on a much larger scale, linked to more functionalities and capable of analyzing many different models. This would allow us to check buildings much more efficiently.
+
+Reflecting on this course has made me realize how much I have learned and how valuable these skills will be in the future. It has also motivated me to explore this field further, as I believe it will continue to grow and become an increasingly important part of the construction industry.
 
