@@ -38,11 +38,12 @@ Another point raised by the manager was that the analysts all submitted document
 
 We received feedback as well that our coding tutorial could function not only for people who make a code but also as guidance for modellers. The code outputs revealed several modelling issues, indirectly demonstrating how models should be structured and where common mistakes occur. As a result, the tutorial not only explains the code but also helps users understand how to create more consistent and accurate models. This was considered a valuable added benefit.
 
-Lastly, we used bounding boxes to determine object dimensions when these were not provided. Caution is needed here: in models where elements are rotated and not orthogonally aligned, bounding boxes may not rotate with the object (see figure below). This can lead to incorrect dimensions because the bounding box does not follow the actual shape of the element. In our model this was not an issue, as the objects were not rotated.
+Lastly, we used bounding boxes to determine object dimensions when these were not provided. Caution is needed here: in models where elements are rotated and not orthogonally aligned, bounding boxes may not rotate with the object. This can lead to incorrect dimensions because the bounding box does not follow the actual shape of the element. In our model this was not an issue, as the objects were not rotated.
 
-Afbeelding met schets, tekening, diagram, Lijnillustraties
+![Bounding box orientation: wrong vs right](./A5 - sketch.png)
 
-Door AI gegenereerde inhoud is mogelijk onjuist.
+
+
 
 The stage that the tool we created works in Advanced Building Design is already mentioned in one of the previous assignments.
 
