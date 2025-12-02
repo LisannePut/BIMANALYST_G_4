@@ -40,10 +40,7 @@ We received feedback as well that our coding tutorial could function not only fo
 
 Lastly, we used bounding boxes to determine object dimensions when these were not provided. Caution is needed here: in models where elements are rotated and not orthogonally aligned, bounding boxes may not rotate with the object. This can lead to incorrect dimensions because the bounding box does not follow the actual shape of the element. In our model this was not an issue, as the objects were not rotated.
 
-![Bounding box orientation: wrong vs right](./A5 - sketch.png)
-
-
-
+![Bounding box orientation: wrong vs right](./A5%20-%20sketch.png)
 
 The stage that the tool we created works in Advanced Building Design is already mentioned in one of the previous assignments.
 
